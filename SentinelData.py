@@ -238,29 +238,39 @@ class Sentinel2DownLoader:
         os.makedirs("./dataset_sentinel/output/", exist_ok=True)
         torch.save(target_tensor, f"./dataset_sentinel/output/{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
 
-    def save_input_tensors(self, target_tensor, filename):
+    def save_input_2tensor(self, input_2tensor, filename):
         os.makedirs("./dataset_sentinel/input/", exist_ok=True)
-        torch.save(target_tensor, f"./dataset_sentinel/input/{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
+        torch.save(input_2tensor[0], f"./dataset_sentinel/input/rgb_{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
+        torch.save(input_2tensor[1], f"./dataset_sentinel/input/mul_{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
 
     def generate_input_2tensor(self, target_tensor):
+        # target_tensor: [H,W,C] (e.g., 4096,2048,5)
 
-        multi_tensor = F.interpolate(
-            target_tensor[:,:, 1:],
-            size=INPUT_SHAPE,
-            mode="area"
-        ).squeeze(0)
+        # Split RGB vs multispectral
+        rgb_tensor = target_tensor[:, :, :3]   # [H,W,3]
+        multi_tensor = target_tensor[:, :, 3:] # [H,W, remaining bands]
 
-        return (target_tensor[:,:, :3], multi_tensor)
+        # Convert multispectral to [C,H,W] for interpolation
+        multi_tensor = multi_tensor.permute(2, 0, 1).unsqueeze(0)  # [1,C,H,W]
+        multi_tensor = F.interpolate(multi_tensor, size=INPUT_SHAPE, mode="area")
+        multi_tensor = multi_tensor.squeeze(0)  # -> [C,H,W]
+
+        # RGB can stay HWC or convert to CHW if needed
+        rgb_tensor = rgb_tensor.permute(2, 0, 1)  # -> [3,H,W]
+
+        return (rgb_tensor, multi_tensor)
 
     def __next__(self):
         sentinel_tensor, id = self.download_next()
         logger.info(f"Generating target_tensors for: {id}")
         target_tensors = self.generate_target_tensors(sentinel_tensor, 4)
         for i, tensor in enumerate(target_tensors):
-            input_rgb_tensor, input_multi_tensor = self.generate_input_2tensor(tensor)
             new_id = str(id)+str(i)
+            logger.debug(f"Generating input_tensors for: {new_id}")
+            input_2tensor= self.generate_input_2tensor(tensor)
             logger.debug(f"saving tensors: {new_id}")
             self.save_target_tensor(tensor, new_id)
+            self.save_input_2tensor(input_2tensor, new_id)
         
         logger.info(f"Saved target_tensors: {id}")
 
