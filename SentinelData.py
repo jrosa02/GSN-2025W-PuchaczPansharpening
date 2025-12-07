@@ -9,7 +9,7 @@ import rasterio
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("sentinel2_loader.log"),
@@ -301,6 +301,6 @@ if __name__ == "__main__":
 
 
     for image in loader:
-        pass
+        break
 
 
