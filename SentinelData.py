@@ -9,6 +9,8 @@ import rasterio
 import torchvision.transforms as T
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
+from pathlib import Path
+import pytest
 
 
 # Configure logging
@@ -211,8 +213,10 @@ class Sentinel2DownLoader:
 
     def save_input_2tensor(self, input_2tensor, filename):
         os.makedirs("./dataset_sentinel/input/", exist_ok=True)
-        torch.save(input_2tensor[0], f"./dataset_sentinel/input/rgb_{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
-        torch.save(input_2tensor[1], f"./dataset_sentinel/input/mul_{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
+        os.makedirs("./dataset_sentinel/input/rgb/", exist_ok=True)
+        os.makedirs("./dataset_sentinel/input/mul/", exist_ok=True)
+        torch.save(input_2tensor[0], f"./dataset_sentinel/input/rgb/{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
+        torch.save(input_2tensor[1], f"./dataset_sentinel/input/mul/{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
 
     def generate_input_2tensor(self, target_tensor):
         # target_tensor: [H,W,C] (e.g., 4096,2048,5)
@@ -234,7 +238,7 @@ class Sentinel2DownLoader:
     def __next__(self):
         sentinel_tensor, id = self.download_next()
         logger.info(f"Generating target_tensors for: {id}")
-        target_tensors = self.generate_target_tensors(sentinel_tensor, 4)
+        target_tensors = self.generate_target_tensors(sentinel_tensor, 1)
         for i, tensor in enumerate(target_tensors):
             new_id = str(id)+str(i)
             logger.debug(f"Generating input_tensors for: {new_id}")
@@ -255,15 +259,119 @@ class Sentinel2DownLoader:
 #     def __len__(self) -> int:
 #         return None
 
+class SentinelDataset(Dataset):
+    def __init__(self, path):
+        super().__init__()
+        path = Path(path)
+        
+        self.input_path_rgb = path / "input/rgb"
+        self.input_path_mul = path / "input/mul"
+        self.output_path = path / "output"
 
-if __name__ == "__main__":
-    logger.info("Starting Sentinel2Loader main execution")
-    loader = Sentinel2DownLoader(
-        bbox=[2.2241, 48.8156, 2.4699, 48.9022],
-        time="2024-01-01/2024-12-31",
-        save_tiff=False
-    )
+        files_rgb = sorted([f for f in self.input_path_rgb.rglob("*") if f.is_file()])
+        files_mul = sorted([f for f in self.input_path_mul.rglob("*") if f.is_file()])
+        assert len(files_rgb) == len(files_mul), \
+            "RGB and Multispectral input file lists have different lenghts!"
+        
+        self.input_file_list = list(zip(files_rgb, files_mul)) #sorted list of tuples like
 
-    for image in loader:
-        break
+        self.output_file_list = sorted([f for f in self.output_path.rglob("*") if f.is_file()])
+    
+    def __len__(self):
+        return len(self.output_file_list) #input file list has twice the number of output elements
 
+    def __getitem__(self, index):
+        input_files = self.input_file_list[index]
+        input_file_rgb = input_files[0]
+        input_file_mul = input_files[1]
+        
+        output_file = self.output_file_list[index]
+
+        x_rgb = torch.load(input_file_rgb, weights_only=False)
+        x_mul = torch.load(input_file_mul, weights_only=False)
+        y = torch.load(output_file, weights_only=False)
+
+        return (x_rgb, x_mul), y
+
+
+
+# if __name__ == "__main__":
+#     logger.info("Starting Sentinel2Loader main execution")
+#     loader = Sentinel2DownLoader(
+#         bbox=[2.2241, 48.8156, 2.4699, 48.9022],
+#         time="2024-01-01/2024-12-31",
+#         save_tiff=False
+#     )
+
+#     for image in loader:
+#         break
+
+@pytest.fixture
+def dataset():
+    data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
+    return SentinelDataset(data_path)
+
+
+def test_file_list_lengths(dataset):
+    """RGB and MUL lists must contain the same number of elements."""
+    assert len(dataset.input_file_list) == len(dataset.output_file_list)
+
+
+def test_len_method(dataset):
+    """Check that __len__ returns correct value."""
+    assert len(dataset) == len(dataset.output_file_list)
+
+
+def test_first_sample_shapes(dataset):
+    """Check that first sample loads and has correct pansharpening-friendly shapes."""
+    (x_rgb, x_mul), y = dataset[0]
+
+    # Tensor type
+    assert isinstance(x_rgb, torch.Tensor)
+    assert isinstance(x_mul, torch.Tensor)
+    assert isinstance(y, torch.Tensor)
+
+    # Must be (C, H, W)
+    assert x_rgb.ndim == 3
+    assert x_mul.ndim == 3
+    assert y.ndim == 3
+
+    # RGB high-res and Y high-res must match
+    assert x_rgb.shape[1:] == y.shape[1:], \
+        "RGB and output MS must have same spatial resolution."
+
+    # MUL must be lower resolution
+    mul_h, mul_w = x_mul.shape[1], x_mul.shape[2]
+    hr_h, hr_w = x_rgb.shape[1], x_rgb.shape[2]
+
+    assert mul_h < hr_h and mul_w < hr_w, \
+        "Multispectral input should be lower resolution than RGB."
+
+    # Channels non-empty
+    assert x_rgb.shape[0] > 0
+    assert x_mul.shape[0] > 0
+    assert y.shape[0] > 0
+
+
+def test_middle_sample(dataset):
+    """Check that a middle sample loads properly."""
+    idx = len(dataset) // 2
+    (x_rgb, x_mul), y = dataset[idx]
+
+    assert x_rgb.ndim == 3
+    assert x_mul.ndim == 3
+    assert y.ndim == 3
+
+
+def test_random_access(dataset):
+    """Test random indexing and pansharpening shape relations."""
+    import random
+    idx = random.randint(0, len(dataset) - 1)
+    (x_rgb, x_mul), y = dataset[idx]
+
+    # RGB and Y must match
+    assert x_rgb.shape[1:] == y.shape[1:]
+
+    # MUL must be smaller
+    assert x_mul.shape[1] < x_rgb.shape[1]
+    assert x_mul.shape[2] < x_rgb.shape[2]
