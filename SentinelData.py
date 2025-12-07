@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from pathlib import Path
 import pytest
+from typing import Tuple
 
 
 # Configure logging
@@ -72,6 +73,9 @@ def augment_tensor(data_tensor, crop_size, rotation_deg=45, noise_std=0.01):
     augmented = transform(data_tensor)
 
     return augmented
+
+
+# ========================================================================================================================
 
 class Sentinel2DownLoader:
     """
@@ -250,15 +254,8 @@ class Sentinel2DownLoader:
         
         logger.info(f"Saved target_tensors: {id}")
 
-# class SmallDataset(Dataset):
-#     def __init__(self) -> None:
-#         super().__init__()
 
-#     def __getitem__(self, index) -> Any:
-#         return None
-    
-#     def __len__(self) -> int:
-#         return None
+# ================================================================================================================================
 
 class SentinelDataset(Dataset):
     def __init__(self, path):
@@ -293,8 +290,179 @@ class SentinelDataset(Dataset):
         y = torch.load(output_file, weights_only=False)
 
         return (x_rgb, x_mul), y
+    
+    def produce_dataloaders(self, train_frac = 0.7, val_frac = 0.2, batch_size = 16, num_workers = 16):
+        total_len = len(self)
+        train_len = int(train_frac * total_len)
+        val_len = int(val_frac * total_len)
+        test_len = total_len - train_len - val_len
+
+        # Split dataset
+        train_dataset, val_dataset, test_dataset = random_split(
+            self, [train_len, val_len, test_len]
+        )
+
+        # Create DataLoaders
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+        val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+        test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+
+        return train_loader, val_loader, test_loader
+    
 
 
+# ==================================================================================================================================
+
+class SentinelCroppedDataset(Dataset):
+    """
+    Tile-based dataset created from saved CHW tensors on disk.
+
+    Expected stored tensor shapes:
+      - RGB:  (C_rgb, H_rgb, W_rgb)    (e.g. (3, 4096, 2048))
+      - MUL:  (C_mul, H_mul, W_mul)    (e.g. (4, 2048, 1024))
+      - OUT:  (C_out, H_out, W_out)    (e.g. (4, 4096, 2048))
+
+    Default cropping behavior (non-overlapping):
+      - RGB tiles -> (C_rgb, 256, 128)
+      - MUL tiles -> (C_mul, 128, 64)
+      - OUT tiles -> (C_out, 256, 128)
+
+    Tiles are aligned so that tile (r, c) in RGB ↔ tile (r, c) in MUL ↔ tile (r, c) in OUT.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        rgb_crop: Tuple[int, int] = (256, 128),
+        mul_crop: Tuple[int, int] = (128, 64),
+        out_crop: Tuple[int, int] = (256, 128),
+    ):
+        super().__init__()
+        path = Path(path)
+
+        self.input_path_rgb = path / "input/rgb"
+        self.input_path_mul = path / "input/mul"
+        self.output_path = path / "output"
+
+        self.rgb_crop_h, self.rgb_crop_w = rgb_crop
+        self.mul_crop_h, self.mul_crop_w = mul_crop
+        self.out_crop_h, self.out_crop_w = out_crop
+
+        self.num_samples = 0
+
+        # Gather files (sorted to preserve deterministic order)
+        self.files_rgb = sorted([p for p in self.input_path_rgb.rglob("*") if p.is_file()])
+        self.files_mul = sorted([p for p in self.input_path_mul.rglob("*") if p.is_file()])
+        self.files_out = sorted([p for p in self.output_path.rglob("*") if p.is_file()])
+
+        if not (len(self.files_rgb) and len(self.files_mul) and len(self.files_out)):
+            raise ValueError("Empty input directories or missing files.")
+
+        if not (len(self.files_rgb) == len(self.files_mul) == len(self.files_out)):
+            raise ValueError("Number of RGB, MUL and OUTPUT files must be equal and corresponding by order.")
+
+        # Precompute index mapping (dataset index -> (image_index, tile_row, tile_col))
+        self.index_map = []
+
+        for img_idx, (rgb_file, mul_file, out_file) in enumerate(zip(self.files_rgb, self.files_mul, self.files_out)):
+            # Load minimal metadata only (here we load the tensor but do not keep it in memory)
+            rgb = torch.load(str(rgb_file), weights_only=False)
+            mul = torch.load(str(mul_file), weights_only=False)
+            out = torch.load(str(out_file), weights_only=False)
+
+            # Validate shapes are CHW
+            if rgb.ndim != 3 or mul.ndim != 3 or out.ndim != 3:
+                raise ValueError(f"Files {rgb_file}, {mul_file} or {out_file} do not contain 3D CHW tensors.")
+
+            _, H_rgb, W_rgb = rgb.shape
+            _, H_mul, W_mul = mul.shape
+            _, H_out, W_out = out.shape
+
+            # Determine how many tiles in each axis (floor division -> remainder truncated)
+            tiles_h_rgb = H_rgb // self.rgb_crop_h
+            tiles_w_rgb = W_rgb // self.rgb_crop_w
+
+            tiles_h_mul = H_mul // self.mul_crop_h
+            tiles_w_mul = W_mul // self.mul_crop_w
+
+            tiles_h_out = H_out // self.out_crop_h
+            tiles_w_out = W_out // self.out_crop_w
+
+            # Ensure tile grid counts match between RGB / MUL / OUT
+            if not (tiles_h_rgb == tiles_h_mul == tiles_h_out and tiles_w_rgb == tiles_w_mul == tiles_w_out):
+                raise ValueError(
+                    f"Tile grid mismatch for image index {img_idx}:\n"
+                    f"RGB tiles (h,w)=({tiles_h_rgb},{tiles_w_rgb}), "
+                    f"MUL tiles=({tiles_h_mul},{tiles_w_mul}), OUT tiles=({tiles_h_out},{tiles_w_out}).\n"
+                    "Ensure the stored images sizes are consistent and divisible by respective crop sizes "
+                    "or choose crop sizes that align across inputs."
+                )
+
+            # Append mapping entries (row-major order)
+            for th in range(tiles_h_rgb):
+                self.num_samples = self.num_samples + 1
+                for tw in range(tiles_w_rgb):
+                    self.index_map.append((img_idx, th, tw))
+
+        if len(self.index_map) == 0:
+            raise ValueError("No tiles were produced — check image and crop sizes.")
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __getitem__(self, index):
+        img_idx, tile_row, tile_col = self.index_map[index]
+
+        rgb_file = self.files_rgb[img_idx]
+        mul_file = self.files_mul[img_idx]
+        out_file = self.files_out[img_idx]
+
+        # Load full tensors (CHW)
+        rgb = torch.load(str(rgb_file), weights_only=False)   # (C_rgb, H_rgb, W_rgb)
+        mul = torch.load(str(mul_file), weights_only=False)   # (C_mul, H_mul, W_mul)
+        out = torch.load(str(out_file), weights_only=False)   # (C_out, H_out, W_out)
+
+        # Compute crop coordinates for RGB / OUT (they share crop size)
+        top_rgb = tile_row * self.rgb_crop_h
+        left_rgb = tile_col * self.rgb_crop_w
+        rgb_crop = rgb[:, top_rgb : top_rgb + self.rgb_crop_h, left_rgb : left_rgb + self.rgb_crop_w]
+
+        out_crop = out[:, top_rgb : top_rgb + self.out_crop_h, left_rgb : left_rgb + self.out_crop_w]
+
+        # Compute crop coordinates for MUL
+        top_mul = tile_row * self.mul_crop_h
+        left_mul = tile_col * self.mul_crop_w
+        mul_crop = mul[:, top_mul : top_mul + self.mul_crop_h, left_mul : left_mul + self.mul_crop_w]
+
+        # Final sanity checks (shapes)
+        if rgb_crop.shape[1:] != (self.rgb_crop_h, self.rgb_crop_w):
+            raise RuntimeError(f"RGB crop has unexpected size: {rgb_crop.shape}")
+        if mul_crop.shape[1:] != (self.mul_crop_h, self.mul_crop_w):
+            raise RuntimeError(f"MUL crop has unexpected size: {mul_crop.shape}")
+        if out_crop.shape[1:] != (self.out_crop_h, self.out_crop_w):
+            raise RuntimeError(f"OUT crop has unexpected size: {out_crop.shape}")
+
+        return (rgb_crop, mul_crop), out_crop
+
+    def produce_dataloaders(self, train_frac=0.7, val_frac=0.2, batch_size=32, num_workers=8, pin_memory=True):
+        total_len = len(self)
+        train_len = int(train_frac * total_len)
+        val_len = int(val_frac * total_len)
+        test_len = total_len - train_len - val_len
+
+        train_ds, val_ds, test_ds = random_split(self, [train_len, val_len, test_len])
+
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                                  num_workers=num_workers, pin_memory=pin_memory)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                                num_workers=num_workers, pin_memory=pin_memory)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+                                 num_workers=num_workers, pin_memory=pin_memory)
+
+        return train_loader, val_loader, test_loader
+
+
+# ====================================================================================================
 
 # if __name__ == "__main__":
 #     logger.info("Starting Sentinel2Loader main execution")
@@ -304,16 +472,18 @@ class SentinelDataset(Dataset):
 #         save_tiff=False
 #     )
 
+#     i = 0
+
 #     for image in loader:
-#         break
+#         if i > 9: break
+#         i = i + 1
 
 #     data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
 #     dataset = SentinelDataset(data_path)
-#     (x_rgb, x_mul), y = dataset[0]
-#     print(x_rgb.shape)
-#     print(x_mul.shape)
-#     print(y.shape)
+#     train_loader, val_loader, test_loader = dataset.produce_dataloaders()
 
+
+# =====================================================================================================
 
 @pytest.fixture
 def dataset():
@@ -384,3 +554,89 @@ def test_random_access(dataset):
     # MUL must be smaller
     assert x_mul.shape[1] < x_rgb.shape[1]
     assert x_mul.shape[2] < x_rgb.shape[2]
+
+def test_data_loaders(dataset):
+    """Test the dataloaders from SentinelDataset."""
+    train_loader, val_loader, test_loader = dataset.produce_dataloaders()
+    total = len(dataset)
+    train_len = int(0.7 * total)
+    val_len   = int(0.2 * total)
+    test_len  = total - train_len - val_len
+
+    assert len(train_loader.dataset) == train_len
+    assert len(val_loader.dataset) == val_len
+    assert len(test_loader.dataset) == test_len
+
+    # Check batches
+    xb, yb = next(iter(train_loader))
+    (rgb_batch, mul_batch), out_batch = xb, yb
+
+    assert rgb_batch.shape[1:] == (3, 4096, 2048)
+    assert mul_batch.shape[1:] == (4, 2048, 1024)
+    assert out_batch.shape[1:] == (4, 4096, 2048)
+
+
+# ----- SentinelCroppedDataset -------------------------------------------------------------------
+@pytest.fixture
+def cropped_dataset():
+    data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
+    return SentinelCroppedDataset(data_path)
+
+def test_cropped_dataset_len(cropped_dataset):
+    # Expect 16 crops: (1024/256) × (512/128) = 4×4 = 16
+    # For each image (currently: 11 images)
+    # So 16x11 = 176
+    assert len(cropped_dataset) == 176
+
+
+def test_cropped_shapes(cropped_dataset):
+    (x_rgb, x_mul), y = cropped_dataset[0]
+
+    assert x_rgb.shape == (3, 256, 128)
+    assert x_mul.shape[1:] == (128, 64)
+    assert y.shape[1:] == x_rgb.shape[1:]
+
+
+def test_cropped_alignment(cropped_dataset):
+    """
+    Ensures that rgb[i], mul[i], and out[i] correspond to the same crop index.
+    """
+    for i in range(len(cropped_dataset)):
+        (rgb_i, mul_i), out_i = cropped_dataset[i]
+
+        assert rgb_i is not None
+        assert mul_i is not None
+        assert out_i is not None
+
+        # Ensure same number of elements
+        assert rgb_i.shape[1:] == out_i.shape[1:]
+
+
+def test_iteration(cropped_dataset):
+    for (x_rgb, x_mul), y in cropped_dataset:
+        assert x_rgb.shape == (3, 256, 128)
+        assert x_mul.shape[1:] == (128, 64)
+        assert y.shape[1:] == x_rgb.shape[1:]
+
+
+def test_full_pass(cropped_dataset):
+    """
+    Ensures full iteration does not crash and returns correct count.
+    """
+    count = 0
+    for _ in cropped_dataset:
+        count += 1
+
+    assert count == len(cropped_dataset)
+
+# def test_dataloaders(cropped_dataset):
+#     train_loader, val_loader, test_loader = cropped_dataset.produce_dataloaders(
+#         train_frac=0.5, val_frac=0.25, batch_size=4, num_workers=0
+#     )
+
+#     # Just verify that loaders produce batches without errors
+#     batch = next(iter(train_loader))
+#     (x_rgb, x_mul), y = batch
+
+#     assert x_rgb.shape[0] <= 4  # batch size
+#     assert x_rgb.shape[1:] == (3, 256, 128)
