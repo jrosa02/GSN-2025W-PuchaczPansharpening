@@ -6,6 +6,10 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from pystac_client import Client
 import planetary_computer as pc
 import rasterio
+import torchvision.transforms as T
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
+
 
 # Configure logging
 logging.basicConfig(
@@ -30,94 +34,42 @@ MULTI_SPATIAL_RES = int(27*4608/2048)
 TARGET_SHAPE = (4096, 2048)
 INPUT_SHAPE = (2048, 1024)
 
-
-import torch
-import torch.nn.functional as F
-import random
-
-def augment_tensor(data_tensor, crop_size=RPI_SHAPE, rotation_deg=45, noise_std=0.01):
+def augment_tensor(data_tensor, crop_size, rotation_deg=45, noise_std=0.01):
     """
-    Apply random augmentations to a multispectral tensor.
+    Augment multispectral tensors using torchvision transforms.
     
-    Parameters
-    ----------
-    data_tensor : torch.Tensor
-        Tensor of shape (C, H, W) or (H, W, C)
-    crop_size : tuple
-        Size of random crop (height, width)
-    rotation_deg : float
-        Maximum rotation angle in degrees (+/-)
-    noise_std : float
-        Standard deviation of added Gaussian noise
+    Input: (C,H,W) or (H,W,C) or batched variants.
+    Output: (C,H_crop,W_crop)
     """
-    # After loading and resizing all bands
-    # sentinel_tensor shape: [C,H,W]
-    if data_tensor.ndim == 5:
-        # probably [B, C, 1, H, W]
-        data_tensor = data_tensor.squeeze(2)  # remove extra dim -> [B,C,H,W]
 
-    # For single sample, remove batch dim
-    if data_tensor.shape[0] == 1:
-        data_tensor = data_tensor.squeeze(0)  # -> [C,H,W]
-    data_tensor = data_tensor.squeeze(1)
+    # -------- Normalize input shape to (C,H,W) --------
+    if data_tensor.ndim == 5:           # [B, C, 1, H, W]
+        data_tensor = data_tensor.squeeze(2)
 
-    # Ensure shape is (H, W, C) for grid_sample
-    if data_tensor.shape[0] <= 10:  # assume C < 10 → (C,H,W)
-        data_tensor = data_tensor.permute(1, 2, 0)  # (H,W,C)
-    
-    H, W, C = data_tensor.shape
+    if data_tensor.ndim == 4 and data_tensor.shape[0] == 1:
+        data_tensor = data_tensor.squeeze(0)  # [C,H,W]
 
-    # --- Random horizontal flip ---
-    if random.random() < 0.5:
-        data_tensor = torch.flip(data_tensor, dims=[1])  # flip width
+    if data_tensor.ndim == 3 and data_tensor.shape[0] <= 10:
+        # Already (C,H,W)
+        pass
+    elif data_tensor.ndim == 3:
+        # Assume (H,W,C)
+        data_tensor = data_tensor.permute(2, 0, 1)  # -> (C,H,W)
 
-    # --- Random vertical flip ---
-    if random.random() < 0.5:
-        data_tensor = torch.flip(data_tensor, dims=[0])  # flip height
+    C, H, W = data_tensor.shape
 
-    # --- Random rotation ---
-    if random.random() < 0.9:
-        angle = random.uniform(-rotation_deg, rotation_deg)
-        angle_rad = torch.tensor(angle * torch.pi / 180)
-        cos_a = torch.cos(angle_rad)
-        sin_a = torch.sin(angle_rad)
+    # -------- torchvision augmentation pipeline --------
+    transform = T.Compose([
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomVerticalFlip(p=0.5),
+        T.RandomRotation(degrees=rotation_deg, expand=False),
+        T.RandomCrop(size=crop_size)
+    ])
 
-        R = torch.tensor([[cos_a, -sin_a],
-                          [sin_a,  cos_a]], dtype=torch.float32)
+    # Apply transform
+    augmented = transform(data_tensor)
 
-        # Create coordinate grid
-        y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
-        x_c = x - (W - 1) / 2
-        y_c = y - (H - 1) / 2
-        coords = torch.stack([x_c, y_c], dim=0).reshape(2, -1)
-
-        coords_rot = R @ coords
-        coords_rot = coords_rot.reshape(2, H, W)
-        x_rot = coords_rot[0] + (W - 1) / 2
-        y_rot = coords_rot[1] + (H - 1) / 2
-
-        # Normalize to [-1,1] for grid_sample
-        x_norm = 2 * (x_rot / (W - 1)) - 1
-        y_norm = 2 * (y_rot / (H - 1)) - 1
-        grid = torch.stack([x_norm, y_norm], dim=-1).unsqueeze(0)  # (1,H,W,2)
-
-        # Apply rotation
-        data_tensor = F.grid_sample(
-            data_tensor.permute(2, 0, 1).unsqueeze(0),  # (1,C,H,W)
-            grid,
-            mode='bilinear',
-            padding_mode='zeros',
-            align_corners=False
-        ).squeeze(0).permute(1, 2, 0)  # back to (H,W,C)
-
-    # --- Random crop ---
-    crop_h, crop_w = crop_size
-    if H > crop_h and W > crop_w:
-        top = random.randint(0, H - crop_h)
-        left = random.randint(0, W - crop_w)
-        data_tensor = data_tensor[top:top+crop_h, left:left+crop_w]
-
-    return data_tensor  # (H_crop, W_crop, C)
+    return augmented
 
 class Sentinel2DownLoader:
     """
@@ -176,6 +128,7 @@ class Sentinel2DownLoader:
     def __iter__(self):
         return self
 
+
     def download_next(self):
         if self._download_index >= len(self.items):
             logger.info("No more items to iterate over")
@@ -185,51 +138,69 @@ class Sentinel2DownLoader:
         self._download_index += 1
         logger.info(f"Downloading item: {item.id}")
         signed_item = pc.sign(item)
-        band_tensors = []
+
+        # Read all bands at native resolution and keep profiles for optional save
+        band_arrays = []
+        band_profiles = []
+        shapes = []
 
         for band in self.bands:
             logger.debug(f"Processing band: {band}")
             asset = signed_item.assets[band]
 
-            # Read band data
+            # Read band data at native resolution
             logger.debug(f"Reading data for band: {band}")
             with rasterio.open(asset.href) as src:
-                data = src.read(1)  # (H,W)
+                data = src.read(1)  # (H, W) numpy array
                 profile = src.profile
 
-            # Optional save
-            if self.save_tiff:
-                logger.debug(f"Saving TIFF for band: {band}")
-                out_path = os.path.join(self.download_folder, f"{item.id}_{band}.tif")
-                with rasterio.open(out_path, "w", **profile) as dst:
-                    dst.write(data, 1)
+            band_arrays.append(data)
+            band_profiles.append(profile)
+            shapes.append(data.shape)  # (H, W)
 
-            # Convert to torch tensor
-            logger.debug(f"Converting band {band} to tensor")
-            tensor = torch.from_numpy(data).float()
+        # Determine common (max) shape among bands so we only upsample smaller bands once
+        heights = [s[0] for s in shapes]
+        widths = [s[1] for s in shapes]
+        common_h = max(heights)
+        common_w = max(widths)
 
-            target_h, target_w = TARGET_SHAPE
+        # Convert numpy arrays to torch and upsample those that are smaller than common shape
+        processed_tensors = []
+        for idx, arr in enumerate(band_arrays):
+            h, w = arr.shape
+            t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).float()  # (1,1,H,W)
 
-            if tensor.ndim == 2:
-                tensor = tensor.unsqueeze(0).unsqueeze(0)  # -> [1, 1, H, W]
-            elif tensor.ndim == 3:
-                tensor = tensor.unsqueeze(0)  # -> [1, C, H, W]
+            if (h, w) != (common_h, common_w):
+                # Upsample to common size once (use bilinear for upsampling, area for downsampling)
+                # Choose mode based on whether we're up or downsampling for better quality
+                mode = "bilinear" if (common_h >= h and common_w >= w) else "area"
+                t = F.interpolate(t, size=(common_h, common_w), mode=mode, align_corners=False if mode == "bilinear" else None)
+                # resulting shape: (1,1,common_h,common_w)
 
-            # target_h, target_w = desired size
-            tensor = F.interpolate(
-                tensor,
-                size=(target_h, target_w),
-                mode="area"
-            ).squeeze(0)
+            # squeeze batch dim -> (1, common_h, common_w)
+            processed_tensors.append(t.squeeze(0))  # each is (1,Hc,Wc)
 
-            band_tensors.append(tensor.unsqueeze(0))  # shape: (1,H,W)
+        # Stack to (C, Hc, Wc)
+        stacked = torch.cat(processed_tensors, dim=0)  # (C, Hc, Wc) because processed_tensors are (1,Hc,Wc)
+
+        # Final resize to TARGET_SHAPE in ONE call (only if needed)
+        target_h, target_w = TARGET_SHAPE
+        if (common_h, common_w) != (target_h, target_w):
+            # interpolate expects (N, C, H, W)
+            stacked = F.interpolate(stacked.unsqueeze(0), size=(target_h, target_w), mode="area").squeeze(0)  # (C, target_h, target_w)
+
+        # Match original output format:
+        # original code produced a tensor shaped like (C,1,H,W) via building a list of (1,H,W) and np.array(...)
+        final_np = stacked.cpu().numpy()  # (C, 1, H, W)
+        final_torch = torch.from_numpy(final_np)        # preserve dtype/behavior similar to original
 
         logger.debug(f"Completed processing item: {item.id}")
-        logger.debug(f"Item Shapes: {[b_t.shape for b_t in band_tensors]}")
-        return torch.from_numpy(np.array(band_tensors)), item.id
+        logger.debug(f"Item Shapes: {[t.shape for t in processed_tensors]}")
+        return final_torch, item.id
+
     
     def generate_target_tensor(self, sentinel_tensor):
-        return augment_tensor(sentinel_tensor, RPI_SHAPE, noise_std=0)
+        return augment_tensor(sentinel_tensor, TARGET_SHAPE, noise_std=0)
 
     def generate_target_tensors(self, sentinel_tensor, n):
         return [self.generate_target_tensor(sentinel_tensor) for _ in range(n)]
@@ -274,12 +245,6 @@ class Sentinel2DownLoader:
         
         logger.info(f"Saved target_tensors: {id}")
 
-
-        
-
-
-
-
 # class SmallDataset(Dataset):
 #     def __init__(self) -> None:
 #         super().__init__()
@@ -299,8 +264,6 @@ if __name__ == "__main__":
         save_tiff=False
     )
 
-
     for image in loader:
         break
-
 
