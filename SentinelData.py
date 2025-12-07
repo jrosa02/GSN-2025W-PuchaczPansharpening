@@ -202,7 +202,12 @@ class Sentinel2DownLoader:
 
     
     def generate_target_tensor(self, sentinel_tensor):
-        return augment_tensor(sentinel_tensor, TARGET_SHAPE, noise_std=0)
+        # sentinel_tensor is CHW (5,4096,2048)
+        # select 4 MS bands (example: 1,2,3,4)
+        ms_tensor = sentinel_tensor[1:, :, :]   # -> (4,4096,2048)
+        augmented = augment_tensor(ms_tensor, TARGET_SHAPE, noise_std=0)
+
+        return augmented  # (4,4096,2048)
 
     def generate_target_tensors(self, sentinel_tensor, n):
         return [self.generate_target_tensor(sentinel_tensor) for _ in range(n)]
@@ -218,22 +223,18 @@ class Sentinel2DownLoader:
         torch.save(input_2tensor[0], f"./dataset_sentinel/input/rgb/{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
         torch.save(input_2tensor[1], f"./dataset_sentinel/input/mul/{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
 
-    def generate_input_2tensor(self, target_tensor):
-        # target_tensor: [H,W,C] (e.g., 4096,2048,5)
+    def generate_input_2tensor(self, rgbms_tensor, target_tensor):
+         # rgbms_tensor = (5,4096,2048) original
+        # target_tensor = (4,4096,2048) output
 
-        # Split RGB vs multispectral
-        rgb_tensor = target_tensor[:, :, :3]   # [H,W,3]
-        multi_tensor = target_tensor[:, :, 3:] # [H,W, remaining bands]
+        rgb = rgbms_tensor[:3, :, :]  # (3,4096,2048)
 
-        # Convert multispectral to [C,H,W] for interpolation
-        multi_tensor = multi_tensor.permute(2, 0, 1).unsqueeze(0)  # [1,C,H,W]
-        multi_tensor = F.interpolate(multi_tensor, size=INPUT_SHAPE, mode="area")
-        multi_tensor = multi_tensor.squeeze(0)  # -> [C,H,W]
+        # Downsample MS to (4,2048,1024)
+        ms = target_tensor.unsqueeze(0)  # (1,4,4096,2048)
+        ms = F.interpolate(ms, size=(2048,1024), mode="area")  # (1,4,H,W)
+        ms = ms.squeeze(0)
 
-        # RGB can stay HWC or convert to CHW if needed
-        rgb_tensor = rgb_tensor.permute(2, 0, 1)  # -> [3,H,W]
-
-        return (rgb_tensor, multi_tensor)
+        return rgb, ms
 
     def __next__(self):
         sentinel_tensor, id = self.download_next()
@@ -242,7 +243,7 @@ class Sentinel2DownLoader:
         for i, tensor in enumerate(target_tensors):
             new_id = str(id)+str(i)
             logger.debug(f"Generating input_tensors for: {new_id}")
-            input_2tensor= self.generate_input_2tensor(tensor)
+            input_2tensor= self.generate_input_2tensor(sentinel_tensor, tensor)
             logger.debug(f"saving tensors: {new_id}")
             self.save_target_tensor(tensor, new_id)
             self.save_input_2tensor(input_2tensor, new_id)
@@ -305,6 +306,14 @@ class SentinelDataset(Dataset):
 
 #     for image in loader:
 #         break
+
+#     data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
+#     dataset = SentinelDataset(data_path)
+#     (x_rgb, x_mul), y = dataset[0]
+#     print(x_rgb.shape)
+#     print(x_mul.shape)
+#     print(y.shape)
+
 
 @pytest.fixture
 def dataset():
