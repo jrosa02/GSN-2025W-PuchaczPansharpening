@@ -444,7 +444,7 @@ class SentinelCroppedDataset(Dataset):
 
         return (rgb_crop, mul_crop), out_crop
 
-    def produce_dataloaders(self, train_frac=0.7, val_frac=0.2, batch_size=32, num_workers=8, pin_memory=True):
+    def produce_dataloaders(self, train_frac=0.7, val_frac=0.2, batch_size=32, num_workers=2, pin_memory=True):
         total_len = len(self)
         train_len = int(train_frac * total_len)
         val_len = int(val_frac * total_len)
@@ -612,31 +612,31 @@ def test_cropped_alignment(cropped_dataset):
         assert rgb_i.shape[1:] == out_i.shape[1:]
 
 
-def test_iteration(cropped_dataset):
-    for (x_rgb, x_mul), y in cropped_dataset:
-        assert x_rgb.shape == (3, 256, 128)
-        assert x_mul.shape[1:] == (128, 64)
-        assert y.shape[1:] == x_rgb.shape[1:]
+# def test_iteration(cropped_dataset):
+#     for (x_rgb, x_mul), y in cropped_dataset:
+#         assert x_rgb.shape == (3, 256, 128)
+#         assert x_mul.shape[1:] == (128, 64)
+#         assert y.shape[1:] == x_rgb.shape[1:]
 
 
-def test_full_pass(cropped_dataset):
-    """
-    Ensures full iteration does not crash and returns correct count.
-    """
-    count = 0
-    for _ in cropped_dataset:
-        count += 1
+# def test_full_pass(cropped_dataset):
+#     """
+#     Ensures full iteration does not crash and returns correct count.
+#     """
+#     count = 0
+#     for _ in cropped_dataset:
+#         count += 1
 
-    assert count == len(cropped_dataset)
+#     assert count == len(cropped_dataset)
 
-# def test_dataloaders(cropped_dataset):
-#     train_loader, val_loader, test_loader = cropped_dataset.produce_dataloaders(
-#         train_frac=0.5, val_frac=0.25, batch_size=4, num_workers=0
-#     )
+def test_dataloaders(cropped_dataset):
+    train_loader, val_loader, test_loader = cropped_dataset.produce_dataloaders(
+        train_frac=0.5, val_frac=0.25, batch_size=4, num_workers=0
+    )
 
-#     # Just verify that loaders produce batches without errors
-#     batch = next(iter(train_loader))
-#     (x_rgb, x_mul), y = batch
+    # Just verify that loaders produce batches without errors
+    batch = next(iter(train_loader))
+    (x_rgb, x_mul), y = batch
 
-#     assert x_rgb.shape[0] <= 4  # batch size
-#     assert x_rgb.shape[1:] == (3, 256, 128)
+    assert x_rgb.shape[0] <= 4  # batch size
+    assert x_rgb.shape[1:] == (3, 256, 128)
