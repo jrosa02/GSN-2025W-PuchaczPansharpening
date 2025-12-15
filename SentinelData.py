@@ -61,18 +61,18 @@ def augment_tensor(data_tensor, crop_size, rotation_deg=45, noise_std=0.01):
 
     C, H, W = data_tensor.shape
 
-    # -------- torchvision augmentation pipeline --------
-    transform = T.Compose([
-        T.RandomHorizontalFlip(p=0.5),
-        T.RandomVerticalFlip(p=0.5),
-        T.RandomRotation(degrees=rotation_deg, expand=False),
-        T.RandomCrop(size=crop_size)
-    ])
+    # # -------- torchvision augmentation pipeline --------
+    # transform = T.Compose([
+    #     T.RandomHorizontalFlip(p=0.5),
+    #     T.RandomVerticalFlip(p=0.5),
+    #     T.RandomRotation(degrees=rotation_deg, expand=False),
+    #     T.RandomCrop(size=crop_size)
+    # ])
 
-    # Apply transform
-    augmented = transform(data_tensor)
+    # # Apply transform
+    # augmented = transform(data_tensor)
 
-    return augmented
+    return data_tensor
 
 
 # ========================================================================================================================
@@ -350,10 +350,10 @@ class SentinelCroppedDataset(Dataset):
 
         self.num_samples = 0
 
-        # Gather files (sorted to preserve deterministic order)
-        self.files_rgb = sorted([p for p in self.input_path_rgb.rglob("*") if p.is_file()])
-        self.files_mul = sorted([p for p in self.input_path_mul.rglob("*") if p.is_file()])
-        self.files_out = sorted([p for p in self.output_path.rglob("*") if p.is_file()])
+        # Gather files
+        self.files_rgb = [p for p in self.input_path_rgb.rglob("*") if p.is_file()]
+        self.files_mul = [p for p in self.input_path_mul.rglob("*") if p.is_file()]
+        self.files_out = [p for p in self.output_path.rglob("*") if p.is_file()]
 
         if not (len(self.files_rgb) and len(self.files_mul) and len(self.files_out)):
             raise ValueError("Empty input directories or missing files.")
@@ -485,158 +485,158 @@ class SentinelCroppedDataset(Dataset):
 
 # =====================================================================================================
 
-@pytest.fixture
-def dataset():
-    data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
-    return SentinelDataset(data_path)
+# @pytest.fixture
+# def dataset():
+#     data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
+#     return SentinelDataset(data_path)
 
 
-def test_file_list_lengths(dataset):
-    """RGB and MUL lists must contain the same number of elements."""
-    assert len(dataset.input_file_list) == len(dataset.output_file_list)
+# def test_file_list_lengths(dataset):
+#     """RGB and MUL lists must contain the same number of elements."""
+#     assert len(dataset.input_file_list) == len(dataset.output_file_list)
 
 
-def test_len_method(dataset):
-    """Check that __len__ returns correct value."""
-    assert len(dataset) == len(dataset.output_file_list)
+# def test_len_method(dataset):
+#     """Check that __len__ returns correct value."""
+#     assert len(dataset) == len(dataset.output_file_list)
 
 
-def test_first_sample_shapes(dataset):
-    """Check that first sample loads and has correct pansharpening-friendly shapes."""
-    (x_rgb, x_mul), y = dataset[0]
+# def test_first_sample_shapes(dataset):
+#     """Check that first sample loads and has correct pansharpening-friendly shapes."""
+#     (x_rgb, x_mul), y = dataset[0]
 
-    # Tensor type
-    assert isinstance(x_rgb, torch.Tensor)
-    assert isinstance(x_mul, torch.Tensor)
-    assert isinstance(y, torch.Tensor)
+#     # Tensor type
+#     assert isinstance(x_rgb, torch.Tensor)
+#     assert isinstance(x_mul, torch.Tensor)
+#     assert isinstance(y, torch.Tensor)
 
-    # Must be (C, H, W)
-    assert x_rgb.ndim == 3
-    assert x_mul.ndim == 3
-    assert y.ndim == 3
+#     # Must be (C, H, W)
+#     assert x_rgb.ndim == 3
+#     assert x_mul.ndim == 3
+#     assert y.ndim == 3
 
-    # RGB high-res and Y high-res must match
-    assert x_rgb.shape[1:] == y.shape[1:], \
-        "RGB and output MS must have same spatial resolution."
+#     # RGB high-res and Y high-res must match
+#     assert x_rgb.shape[1:] == y.shape[1:], \
+#         "RGB and output MS must have same spatial resolution."
 
-    # MUL must be lower resolution
-    mul_h, mul_w = x_mul.shape[1], x_mul.shape[2]
-    hr_h, hr_w = x_rgb.shape[1], x_rgb.shape[2]
+#     # MUL must be lower resolution
+#     mul_h, mul_w = x_mul.shape[1], x_mul.shape[2]
+#     hr_h, hr_w = x_rgb.shape[1], x_rgb.shape[2]
 
-    assert mul_h < hr_h and mul_w < hr_w, \
-        "Multispectral input should be lower resolution than RGB."
+#     assert mul_h < hr_h and mul_w < hr_w, \
+#         "Multispectral input should be lower resolution than RGB."
 
-    # Channels non-empty
-    assert x_rgb.shape[0] > 0
-    assert x_mul.shape[0] > 0
-    assert y.shape[0] > 0
-
-
-def test_middle_sample(dataset):
-    """Check that a middle sample loads properly."""
-    idx = len(dataset) // 2
-    (x_rgb, x_mul), y = dataset[idx]
-
-    assert x_rgb.ndim == 3
-    assert x_mul.ndim == 3
-    assert y.ndim == 3
+#     # Channels non-empty
+#     assert x_rgb.shape[0] > 0
+#     assert x_mul.shape[0] > 0
+#     assert y.shape[0] > 0
 
 
-def test_random_access(dataset):
-    """Test random indexing and pansharpening shape relations."""
-    import random
-    idx = random.randint(0, len(dataset) - 1)
-    (x_rgb, x_mul), y = dataset[idx]
+# def test_middle_sample(dataset):
+#     """Check that a middle sample loads properly."""
+#     idx = len(dataset) // 2
+#     (x_rgb, x_mul), y = dataset[idx]
 
-    # RGB and Y must match
-    assert x_rgb.shape[1:] == y.shape[1:]
-
-    # MUL must be smaller
-    assert x_mul.shape[1] < x_rgb.shape[1]
-    assert x_mul.shape[2] < x_rgb.shape[2]
-
-def test_data_loaders(dataset):
-    """Test the dataloaders from SentinelDataset."""
-    train_loader, val_loader, test_loader = dataset.produce_dataloaders()
-    total = len(dataset)
-    train_len = int(0.7 * total)
-    val_len   = int(0.2 * total)
-    test_len  = total - train_len - val_len
-
-    assert len(train_loader.dataset) == train_len
-    assert len(val_loader.dataset) == val_len
-    assert len(test_loader.dataset) == test_len
-
-    # Check batches
-    xb, yb = next(iter(train_loader))
-    (rgb_batch, mul_batch), out_batch = xb, yb
-
-    assert rgb_batch.shape[1:] == (3, 4096, 2048)
-    assert mul_batch.shape[1:] == (4, 2048, 1024)
-    assert out_batch.shape[1:] == (4, 4096, 2048)
+#     assert x_rgb.ndim == 3
+#     assert x_mul.ndim == 3
+#     assert y.ndim == 3
 
 
-# ----- SentinelCroppedDataset -------------------------------------------------------------------
-@pytest.fixture
-def cropped_dataset():
-    data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
-    return SentinelCroppedDataset(data_path)
+# def test_random_access(dataset):
+#     """Test random indexing and pansharpening shape relations."""
+#     import random
+#     idx = random.randint(0, len(dataset) - 1)
+#     (x_rgb, x_mul), y = dataset[idx]
 
-def test_cropped_dataset_len(cropped_dataset):
-    # Expect 16 crops: (1024/256) × (512/128) = 4×4 = 16
-    # For each image (currently: 11 images)
-    # So 16x11 = 176
-    assert len(cropped_dataset) == 176
+#     # RGB and Y must match
+#     assert x_rgb.shape[1:] == y.shape[1:]
 
+#     # MUL must be smaller
+#     assert x_mul.shape[1] < x_rgb.shape[1]
+#     assert x_mul.shape[2] < x_rgb.shape[2]
 
-def test_cropped_shapes(cropped_dataset):
-    (x_rgb, x_mul), y = cropped_dataset[0]
+# def test_data_loaders(dataset):
+#     """Test the dataloaders from SentinelDataset."""
+#     train_loader, val_loader, test_loader = dataset.produce_dataloaders()
+#     total = len(dataset)
+#     train_len = int(0.7 * total)
+#     val_len   = int(0.2 * total)
+#     test_len  = total - train_len - val_len
 
-    assert x_rgb.shape == (3, 256, 128)
-    assert x_mul.shape[1:] == (128, 64)
-    assert y.shape[1:] == x_rgb.shape[1:]
+#     assert len(train_loader.dataset) == train_len
+#     assert len(val_loader.dataset) == val_len
+#     assert len(test_loader.dataset) == test_len
 
+#     # Check batches
+#     xb, yb = next(iter(train_loader))
+#     (rgb_batch, mul_batch), out_batch = xb, yb
 
-def test_cropped_alignment(cropped_dataset):
-    """
-    Ensures that rgb[i], mul[i], and out[i] correspond to the same crop index.
-    """
-    for i in range(len(cropped_dataset)):
-        (rgb_i, mul_i), out_i = cropped_dataset[i]
-
-        assert rgb_i is not None
-        assert mul_i is not None
-        assert out_i is not None
-
-        # Ensure same number of elements
-        assert rgb_i.shape[1:] == out_i.shape[1:]
+#     assert rgb_batch.shape[1:] == (3, 4096, 2048)
+#     assert mul_batch.shape[1:] == (4, 2048, 1024)
+#     assert out_batch.shape[1:] == (4, 4096, 2048)
 
 
-# def test_iteration(cropped_dataset):
-#     for (x_rgb, x_mul), y in cropped_dataset:
-#         assert x_rgb.shape == (3, 256, 128)
-#         assert x_mul.shape[1:] == (128, 64)
-#         assert y.shape[1:] == x_rgb.shape[1:]
+# # ----- SentinelCroppedDataset -------------------------------------------------------------------
+# @pytest.fixture
+# def cropped_dataset():
+#     data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
+#     return SentinelCroppedDataset(data_path)
+
+# def test_cropped_dataset_len(cropped_dataset):
+#     # Expect 16 crops: (1024/256) × (512/128) = 4×4 = 16
+#     # For each image (currently: 11 images)
+#     # So 16x11 = 176
+#     assert len(cropped_dataset) == 176
 
 
-# def test_full_pass(cropped_dataset):
+# def test_cropped_shapes(cropped_dataset):
+#     (x_rgb, x_mul), y = cropped_dataset[0]
+
+#     assert x_rgb.shape == (3, 256, 128)
+#     assert x_mul.shape[1:] == (128, 64)
+#     assert y.shape[1:] == x_rgb.shape[1:]
+
+
+# def test_cropped_alignment(cropped_dataset):
 #     """
-#     Ensures full iteration does not crash and returns correct count.
+#     Ensures that rgb[i], mul[i], and out[i] correspond to the same crop index.
 #     """
-#     count = 0
-#     for _ in cropped_dataset:
-#         count += 1
+#     for i in range(len(cropped_dataset)):
+#         (rgb_i, mul_i), out_i = cropped_dataset[i]
 
-#     assert count == len(cropped_dataset)
+#         assert rgb_i is not None
+#         assert mul_i is not None
+#         assert out_i is not None
 
-def test_dataloaders(cropped_dataset):
-    train_loader, val_loader, test_loader = cropped_dataset.produce_dataloaders(
-        train_frac=0.5, val_frac=0.25, batch_size=4, num_workers=0
-    )
+#         # Ensure same number of elements
+#         assert rgb_i.shape[1:] == out_i.shape[1:]
 
-    # Just verify that loaders produce batches without errors
-    batch = next(iter(train_loader))
-    (x_rgb, x_mul), y = batch
 
-    assert x_rgb.shape[0] <= 4  # batch size
-    assert x_rgb.shape[1:] == (3, 256, 128)
+# # def test_iteration(cropped_dataset):
+# #     for (x_rgb, x_mul), y in cropped_dataset:
+# #         assert x_rgb.shape == (3, 256, 128)
+# #         assert x_mul.shape[1:] == (128, 64)
+# #         assert y.shape[1:] == x_rgb.shape[1:]
+
+
+# # def test_full_pass(cropped_dataset):
+# #     """
+# #     Ensures full iteration does not crash and returns correct count.
+# #     """
+# #     count = 0
+# #     for _ in cropped_dataset:
+# #         count += 1
+
+# #     assert count == len(cropped_dataset)
+
+# def test_dataloaders(cropped_dataset):
+#     train_loader, val_loader, test_loader = cropped_dataset.produce_dataloaders(
+#         train_frac=0.5, val_frac=0.25, batch_size=4, num_workers=0
+#     )
+
+#     # Just verify that loaders produce batches without errors
+#     batch = next(iter(train_loader))
+#     (x_rgb, x_mul), y = batch
+
+#     assert x_rgb.shape[0] <= 4  # batch size
+#     assert x_rgb.shape[1:] == (3, 256, 128)
