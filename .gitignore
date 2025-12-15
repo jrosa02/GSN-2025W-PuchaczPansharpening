@@ -209,4 +209,7 @@ __marimo__/
 raw_data/**
 data/**
 data_set/**
-
+lightning_logs/**
+dataset**
+*.pth
+.vscode
