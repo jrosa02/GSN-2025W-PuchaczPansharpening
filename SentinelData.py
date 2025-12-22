@@ -12,6 +12,7 @@ import torchvision.transforms.functional as TF
 from pathlib import Path
 import pytest
 from typing import Tuple
+from ConfigParser import ConfigParser
 
 
 # Configure logging
@@ -19,23 +20,12 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("sentinel2_loader.log"),
+        logging.FileHandler("./logs/sentinel2_loader.log"),
         logging.StreamHandler()
     ]
 )
 
 logger = logging.getLogger(__name__)
-
-MAX_DATA_SIZE = 100 * 2**30  # 100 GB
-
-RPI_SHAPE = (2592, 4608)
-MULTI_SHAPE = (1152 ,2048)
-
-RPI_SPATIAL_RES = 27
-MULTI_SPATIAL_RES = int(27*4608/2048)
-
-TARGET_SHAPE = (4096, 2048)
-INPUT_SHAPE = (2048, 1024)
 
 def augment_tensor(data_tensor, crop_size, rotation_deg=45, noise_std=0.01):
     """
@@ -97,16 +87,17 @@ class Sentinel2DownLoader:
         If True, normalize bands to 0–1
     """
     
-    def __init__(self, bbox, time, bands=None, save_tiff=False, download_folder="sentinel2_data"):
+    def __init__(self, bbox, time, bands=None, save_tiff=True, download_folder="sentinel2_data"):
         logger.info("Initializing Sentinel2Loader")
+        self.configparser = ConfigParser()
         self.bbox = bbox
         self.time = time
-        self.bands = ["B02","B03","B04","B06","B08"]
-        self.input_spatial_res_m = [10, 10, 10, 20, 10]
-        self.imput_shapes = [(10980, 10980), (10980, 10980), (10980, 10980), (5490, 5490), (10980, 10980), ]
-        self.output_spatial_res_m = 27
-        # self.output_shape = (int(10980/2.7), int(10980/2.7))
-        self.output_shape = (4096, 2048)
+        # self.bands = ["B02","B03","B04","B06","B08"]
+        # self.input_spatial_res_m = [10, 10, 10, 20, 10]
+        # self.imput_shapes = [(10980, 10980), (10980, 10980), (10980, 10980), (5490, 5490), (10980, 10980), ]
+        # self.output_spatial_res_m = 27
+        # # self.output_shape = (int(10980/2.7), int(10980/2.7))
+        # self.output_shape = (4096, 2048)
         self.save_tiff = save_tiff
         self.download_folder = download_folder
 
@@ -150,12 +141,13 @@ class Sentinel2DownLoader:
         band_profiles = []
         shapes = []
 
-        for band in self.bands:
-            logger.debug(f"Processing band: {band}")
-            asset = signed_item.assets[band]
+        for band in self.configparser.get_sentinel_2_bands():
+            band_name = band["band"]
+            logger.debug(f"Processing band: {band_name}")
+            asset = signed_item.assets[band_name]
 
             # Read band data at native resolution
-            logger.debug(f"Reading data for band: {band}")
+            logger.debug(f"Reading data for band: {band_name}")
             with rasterio.open(asset.href) as src:
                 data = src.read(1)  # (H, W) numpy array
                 profile = src.profile
@@ -190,7 +182,7 @@ class Sentinel2DownLoader:
         stacked = torch.cat(processed_tensors, dim=0)  # (C, Hc, Wc) because processed_tensors are (1,Hc,Wc)
 
         # Final resize to TARGET_SHAPE in ONE call (only if needed)
-        target_h, target_w = TARGET_SHAPE
+        target_h, target_w = self.configparser.get_mul_input_cv2_shape()[:2]
         if (common_h, common_w) != (target_h, target_w):
             # interpolate expects (N, C, H, W)
             stacked = F.interpolate(stacked.unsqueeze(0), size=(target_h, target_w), mode="area").squeeze(0)  # (C, target_h, target_w)
@@ -257,63 +249,14 @@ class Sentinel2DownLoader:
 
 # ================================================================================================================================
 
+
 class SentinelDataset(Dataset):
-    def __init__(self, path):
+    def __init__(self) -> None:
         super().__init__()
-        path = Path(path)
-        
-        self.input_path_rgb = path / "input/rgb"
-        self.input_path_mul = path / "input/mul"
-        self.output_path = path / "output"
 
-        files_rgb = sorted([f for f in self.input_path_rgb.rglob("*") if f.is_file()])
-        files_mul = sorted([f for f in self.input_path_mul.rglob("*") if f.is_file()])
-        assert len(files_rgb) == len(files_mul), \
-            "RGB and Multispectral input file lists have different lenghts!"
-        
-        self.input_file_list = list(zip(files_rgb, files_mul)) #sorted list of tuples like
+# ================================================================================================================================
 
-        self.output_file_list = sorted([f for f in self.output_path.rglob("*") if f.is_file()])
-    
-    def __len__(self):
-        return len(self.output_file_list) #input file list has twice the number of output elements
-
-    def __getitem__(self, index):
-        input_files = self.input_file_list[index]
-        input_file_rgb = input_files[0]
-        input_file_mul = input_files[1]
-        
-        output_file = self.output_file_list[index]
-
-        x_rgb = torch.load(input_file_rgb, weights_only=False)
-        x_mul = torch.load(input_file_mul, weights_only=False)
-        y = torch.load(output_file, weights_only=False)
-
-        return (x_rgb, x_mul), y
-    
-    def produce_dataloaders(self, train_frac = 0.7, val_frac = 0.2, batch_size = 16, num_workers = 16):
-        total_len = len(self)
-        train_len = int(train_frac * total_len)
-        val_len = int(val_frac * total_len)
-        test_len = total_len - train_len - val_len
-
-        # Split dataset
-        train_dataset, val_dataset, test_dataset = random_split(
-            self, [train_len, val_len, test_len]
-        )
-
-        # Create DataLoaders
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-        val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-        test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-
-        return train_loader, val_loader, test_loader
-    
-
-
-# ==================================================================================================================================
-
-class SentinelCroppedDataset(Dataset):
+class SentinelCroppedDataset(SentinelDataset):
     """
     Tile-based dataset created from saved CHW tensors on disk.
 
@@ -464,179 +407,104 @@ class SentinelCroppedDataset(Dataset):
 
 # ====================================================================================================
 
-# if __name__ == "__main__":
-#     logger.info("Starting Sentinel2Loader main execution")
-#     loader = Sentinel2DownLoader(
-#         bbox=[2.2241, 48.8156, 2.4699, 48.9022],
-#         time="2024-01-01/2024-12-31",
-#         save_tiff=False
-#     )
+if __name__ == "__main__":
+    logger.info("Starting Sentinel2Loader main execution")
+    loader = Sentinel2DownLoader(
+        bbox=[2.2241, 48.8156, 2.4699, 48.9022],
+        time="2024-01-01/2024-12-31",
+        save_tiff=False
+    )
 
-#     i = 0
+    i = 0
 
-#     for image in loader:
-#         if i > 9: break
-#         i = i + 1
+    for image in loader:
+        if i > 1: break
+        i = i + 1
 
-#     data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
-#     dataset = SentinelDataset(data_path)
-#     train_loader, val_loader, test_loader = dataset.produce_dataloaders()
-
-
-# =====================================================================================================
-
-# @pytest.fixture
-# def dataset():
-#     data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
-#     return SentinelDataset(data_path)
+    data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
+    dataset = SentinelCroppedDataset(data_path)
+    train_loader, val_loader, test_loader = dataset.produce_dataloaders()
 
 
-# def test_file_list_lengths(dataset):
-#     """RGB and MUL lists must contain the same number of elements."""
-#     assert len(dataset.input_file_list) == len(dataset.output_file_list)
+# ----- Sentinel2DownLoader -------------------------------------------------------------------
+
+def test_sentinel2downloader_init():
+    loader = Sentinel2DownLoader(
+        bbox=[2.2241, 48.8156, 2.4699, 48.9022],
+        time="2024-01-01/2024-12-31",
+        save_tiff=False
+    )
+
+def test_sentinel2downloader_download():
+    loader = Sentinel2DownLoader(
+        bbox=[2.2241, 48.8156, 2.4699, 48.9022],
+        time="2024-01-01/2024-12-31",
+        save_tiff=True
+    )
+
+    tensor, id = loader.download_next()
+
+# ----- SentinelCroppedDataset -------------------------------------------------------------------
+@pytest.fixture
+def cropped_dataset():
+    data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
+    return SentinelCroppedDataset(data_path)
+
+def test_cropped_dataset_len(cropped_dataset):
+    # Expect 16 crops: (1024/256) × (512/128) = 4×4 = 16
+    # For each image (currently: 11 images)
+    # So 16x11 = 176
+    assert len(cropped_dataset) == 176
 
 
-# def test_len_method(dataset):
-#     """Check that __len__ returns correct value."""
-#     assert len(dataset) == len(dataset.output_file_list)
+def test_cropped_shapes(cropped_dataset):
+    (x_rgb, x_mul), y = cropped_dataset[0]
+
+    assert x_rgb.shape == (3, 256, 128)
+    assert x_mul.shape[1:] == (128, 64)
+    assert y.shape[1:] == x_rgb.shape[1:]
 
 
-# def test_first_sample_shapes(dataset):
-#     """Check that first sample loads and has correct pansharpening-friendly shapes."""
-#     (x_rgb, x_mul), y = dataset[0]
+def test_cropped_alignment(cropped_dataset):
+    """
+    Ensures that rgb[i], mul[i], and out[i] correspond to the same crop index.
+    """
+    for i in range(len(cropped_dataset)):
+        (rgb_i, mul_i), out_i = cropped_dataset[i]
 
-#     # Tensor type
-#     assert isinstance(x_rgb, torch.Tensor)
-#     assert isinstance(x_mul, torch.Tensor)
-#     assert isinstance(y, torch.Tensor)
+        assert rgb_i is not None
+        assert mul_i is not None
+        assert out_i is not None
 
-#     # Must be (C, H, W)
-#     assert x_rgb.ndim == 3
-#     assert x_mul.ndim == 3
-#     assert y.ndim == 3
-
-#     # RGB high-res and Y high-res must match
-#     assert x_rgb.shape[1:] == y.shape[1:], \
-#         "RGB and output MS must have same spatial resolution."
-
-#     # MUL must be lower resolution
-#     mul_h, mul_w = x_mul.shape[1], x_mul.shape[2]
-#     hr_h, hr_w = x_rgb.shape[1], x_rgb.shape[2]
-
-#     assert mul_h < hr_h and mul_w < hr_w, \
-#         "Multispectral input should be lower resolution than RGB."
-
-#     # Channels non-empty
-#     assert x_rgb.shape[0] > 0
-#     assert x_mul.shape[0] > 0
-#     assert y.shape[0] > 0
+        # Ensure same number of elements
+        assert rgb_i.shape[1:] == out_i.shape[1:]
 
 
-# def test_middle_sample(dataset):
-#     """Check that a middle sample loads properly."""
-#     idx = len(dataset) // 2
-#     (x_rgb, x_mul), y = dataset[idx]
-
-#     assert x_rgb.ndim == 3
-#     assert x_mul.ndim == 3
-#     assert y.ndim == 3
+def test_iteration(cropped_dataset):
+    for (x_rgb, x_mul), y in cropped_dataset:
+        assert x_rgb.shape == (3, 256, 128)
+        assert x_mul.shape[1:] == (128, 64)
+        assert y.shape[1:] == x_rgb.shape[1:]
 
 
-# def test_random_access(dataset):
-#     """Test random indexing and pansharpening shape relations."""
-#     import random
-#     idx = random.randint(0, len(dataset) - 1)
-#     (x_rgb, x_mul), y = dataset[idx]
+def test_full_pass(cropped_dataset):
+    """
+    Ensures full iteration does not crash and returns correct count.
+    """
+    count = 0
+    for _ in cropped_dataset:
+        count += 1
 
-#     # RGB and Y must match
-#     assert x_rgb.shape[1:] == y.shape[1:]
+    assert count == len(cropped_dataset)
 
-#     # MUL must be smaller
-#     assert x_mul.shape[1] < x_rgb.shape[1]
-#     assert x_mul.shape[2] < x_rgb.shape[2]
+def test_dataloaders(cropped_dataset):
+    train_loader, val_loader, test_loader = cropped_dataset.produce_dataloaders(
+        train_frac=0.5, val_frac=0.25, batch_size=4, num_workers=0
+    )
 
-# def test_data_loaders(dataset):
-#     """Test the dataloaders from SentinelDataset."""
-#     train_loader, val_loader, test_loader = dataset.produce_dataloaders()
-#     total = len(dataset)
-#     train_len = int(0.7 * total)
-#     val_len   = int(0.2 * total)
-#     test_len  = total - train_len - val_len
+    # Just verify that loaders produce batches without errors
+    batch = next(iter(train_loader))
+    (x_rgb, x_mul), y = batch
 
-#     assert len(train_loader.dataset) == train_len
-#     assert len(val_loader.dataset) == val_len
-#     assert len(test_loader.dataset) == test_len
-
-#     # Check batches
-#     xb, yb = next(iter(train_loader))
-#     (rgb_batch, mul_batch), out_batch = xb, yb
-
-#     assert rgb_batch.shape[1:] == (3, 4096, 2048)
-#     assert mul_batch.shape[1:] == (4, 2048, 1024)
-#     assert out_batch.shape[1:] == (4, 4096, 2048)
-
-
-# # ----- SentinelCroppedDataset -------------------------------------------------------------------
-# @pytest.fixture
-# def cropped_dataset():
-#     data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
-#     return SentinelCroppedDataset(data_path)
-
-# def test_cropped_dataset_len(cropped_dataset):
-#     # Expect 16 crops: (1024/256) × (512/128) = 4×4 = 16
-#     # For each image (currently: 11 images)
-#     # So 16x11 = 176
-#     assert len(cropped_dataset) == 176
-
-
-# def test_cropped_shapes(cropped_dataset):
-#     (x_rgb, x_mul), y = cropped_dataset[0]
-
-#     assert x_rgb.shape == (3, 256, 128)
-#     assert x_mul.shape[1:] == (128, 64)
-#     assert y.shape[1:] == x_rgb.shape[1:]
-
-
-# def test_cropped_alignment(cropped_dataset):
-#     """
-#     Ensures that rgb[i], mul[i], and out[i] correspond to the same crop index.
-#     """
-#     for i in range(len(cropped_dataset)):
-#         (rgb_i, mul_i), out_i = cropped_dataset[i]
-
-#         assert rgb_i is not None
-#         assert mul_i is not None
-#         assert out_i is not None
-
-#         # Ensure same number of elements
-#         assert rgb_i.shape[1:] == out_i.shape[1:]
-
-
-# # def test_iteration(cropped_dataset):
-# #     for (x_rgb, x_mul), y in cropped_dataset:
-# #         assert x_rgb.shape == (3, 256, 128)
-# #         assert x_mul.shape[1:] == (128, 64)
-# #         assert y.shape[1:] == x_rgb.shape[1:]
-
-
-# # def test_full_pass(cropped_dataset):
-# #     """
-# #     Ensures full iteration does not crash and returns correct count.
-# #     """
-# #     count = 0
-# #     for _ in cropped_dataset:
-# #         count += 1
-
-# #     assert count == len(cropped_dataset)
-
-# def test_dataloaders(cropped_dataset):
-#     train_loader, val_loader, test_loader = cropped_dataset.produce_dataloaders(
-#         train_frac=0.5, val_frac=0.25, batch_size=4, num_workers=0
-#     )
-
-#     # Just verify that loaders produce batches without errors
-#     batch = next(iter(train_loader))
-#     (x_rgb, x_mul), y = batch
-
-#     assert x_rgb.shape[0] <= 4  # batch size
-#     assert x_rgb.shape[1:] == (3, 256, 128)
+    assert x_rgb.shape[0] <= 4  # batch size
+    assert x_rgb.shape[1:] == (3, 256, 128)

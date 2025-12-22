@@ -1,0 +1,30 @@
+{
+    "rgb_input_config":
+    {
+        "gsd_m": 27,
+        "rows":100000,
+        "cols":100000,
+        "chanels":3
+    },
+    "multispectral_input_config":
+    {
+        "gsd_m": 54,
+        "rows":50000,
+        "cols":50000,
+        "chanels":4
+    },
+    "sentinel2_l2a_config":
+    {
+        "bands_list": [
+            {"band": "B02", "gsd_m": 10, "shape": [10980, 10980]},
+            {"band": "B03", "gsd_m": 10, "shape": [10980, 10980]},
+            {"band": "B04", "gsd_m": 10, "shape": [10980, 10980]},
+            {"band": "B06", "gsd_m": 20, "shape": [5490, 5490]},
+            {"band": "B08", "gsd_m": 10, "shape": [10980, 10980]}
+        ]
+    },
+
+    "system_storage_size_cap_GB": 100,
+
+    "num_workers": 16
+}
