@@ -68,6 +68,20 @@ class ConfigParser():
         sentinel_2_config = self.config['sentinel2_l2a_config']
         return sentinel_2_config['bands_list']
 
+#=============
+# TRAINING CONFIG
+
+    def get_training_num_workers(self) -> int:
+        training_config = self.config['traininig']
+        return training_config['num_workers']
+
+#=============
+# CHUNKINMG CONFIG
+
+    def get_chunk_size(self):
+        chunking_config = self.config['chunking_config']
+        return chunking_config['chunk_shape']
+
 
 #====================================================================================================
 def test_class_init():

@@ -89,7 +89,7 @@ class Sentinel2DownLoader:
     download_folder : str, optional
         Dataset location
     normalize : bool, optional
-        If True, normalize bands to 0–1
+        If True, normalize bands to 0-1
     """
 
     def __init__(self, bbox, time, max_items: int | None = None, download_folder="dataset_sentinel"):
@@ -281,6 +281,8 @@ class SentinelDataset(Dataset):
         super().__init__()
         path = Path(path).resolve()
 
+        self.config = ConfigParser()
+
         self.input_path_rgb = path / "input/rgb"
         self.input_path_mul = path / "input/mul"
         self.output_path = path / "output"
@@ -318,9 +320,10 @@ class SentinelDataset(Dataset):
         train_frac=0.7,
         val_frac=0.2,
         batch_size=32,
-        num_workers=2,
         pin_memory=True,
     ):
+        num_workers = self.config.get_training_num_workers()
+
         total_len = len(self)
         train_len = int(train_frac * total_len)
         val_len = int(val_frac * total_len)
@@ -345,11 +348,20 @@ class SentinelCroppedDataset(SentinelDataset):
     def __init__(
         self,
         path: str | Path,
-        rgb_crop: Tuple[int, int] = (256, 128),
-        mul_crop: Tuple[int, int] = (128, 64),
-        out_crop: Tuple[int, int] = (256, 128),
+        rgb_crop: Tuple[int, int] | None = None,
+        mul_crop: Tuple[int, int] | None = None,
+        out_crop: Tuple[int, int] | None = None,
     ):
         super().__init__(path)
+
+        if rgb_crop is None:
+            rgb_crop = tuple(self.config.get_chunk_size())
+
+        if mul_crop is None:
+            mul_crop = (self.config.get_chunk_size()[0]//2, self.config.get_chunk_size()[1]//2)
+
+        if out_crop is None:
+            out_crop = tuple(self.config.get_chunk_size())
 
         self.rgb_crop_h, self.rgb_crop_w = rgb_crop
         self.mul_crop_h, self.mul_crop_w = mul_crop
@@ -391,6 +403,9 @@ class SentinelCroppedDataset(SentinelDataset):
 
         if self.num_samples == 0:
             raise ValueError("No tiles were produced.")
+        
+    def is_blank_image(self, tensor: torch.Tensor, std_threshold=1.0):
+        return tensor.std() < std_threshold
 
     def __len__(self) -> int:
         return self.num_samples
@@ -481,8 +496,8 @@ def cropped_dataset():
 def test_cropped_shapes(cropped_dataset):
     (x_rgb, x_mul), y = cropped_dataset[0]
 
-    assert x_rgb.shape == (3, 256, 128)
-    assert x_mul.shape[1:] == (128, 64)
+    assert x_rgb.shape == (3, 256, 256)
+    assert x_mul.shape[1:] == (128, 128)
     assert y.shape[1:] == x_rgb.shape[1:]
 
 
@@ -503,8 +518,8 @@ def test_cropped_alignment(cropped_dataset):
 
 def test_iteration(cropped_dataset):
     for (x_rgb, x_mul), y in cropped_dataset:
-        assert x_rgb.shape == (3, 256, 128)
-        assert x_mul.shape[1:] == (128, 64)
+        assert x_rgb.shape == (3, 256, 256)
+        assert x_mul.shape[1:] == (128, 128)
         assert y.shape[1:] == x_rgb.shape[1:]
 
 
@@ -520,7 +535,7 @@ def test_full_pass(cropped_dataset):
 
 def test_dataloaders(cropped_dataset):
     train_loader, val_loader, test_loader = cropped_dataset.produce_dataloaders(
-        train_frac=0.5, val_frac=0.25, batch_size=4, num_workers=0
+        train_frac=0.5, val_frac=0.25, batch_size=4
     )
 
     # Just verify that loaders produce batches without errors
@@ -528,4 +543,4 @@ def test_dataloaders(cropped_dataset):
     (x_rgb, x_mul), y = batch
 
     assert x_rgb.shape[0] <= 4  # batch size
-    assert x_rgb.shape[1:] == (3, 256, 128)
+    assert x_rgb.shape[1:] == (3, 256, 256)

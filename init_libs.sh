@@ -61,5 +61,6 @@ $INSTALLER install opencv-python --upgrade
 $INSTALLER install rasterio --upgrade
 $INSTALLER install zarr --upgrade
 $INSTALLER install pytest --upgrade
+$INSTALLER install ipykernel --upgrade
 
 echo "All packages installed successfully!"

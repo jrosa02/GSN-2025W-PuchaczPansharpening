@@ -31,9 +31,15 @@
         "chanels":5
     },
 
+    "chunking_config":
+    {
+        "chunk_shape": [256, 256],
+        "margin_size": [32, 32]
+    },
+
     "system_storage_size_cap_GB": 100,
 
     "traininig":{
-        "num_workers": 16
+        "num_workers": 4
     }
 }
