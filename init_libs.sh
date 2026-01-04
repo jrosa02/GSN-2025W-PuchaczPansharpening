@@ -62,5 +62,7 @@ $INSTALLER install rasterio --upgrade
 $INSTALLER install zarr --upgrade
 $INSTALLER install pytest --upgrade
 $INSTALLER install ipykernel --upgrade
+$INSTALLER install torchview --upgrade
+$INSTALLER install torchcam --upgrade
 
 echo "All packages installed successfully!"

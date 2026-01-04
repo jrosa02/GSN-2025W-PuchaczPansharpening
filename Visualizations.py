@@ -37,7 +37,6 @@ def visualize_one_sample(
     data_path,
     loader_type="train",       # "train", "val", or "test"
     batch_size=16,
-    num_workers=2,
 ):
     """
     Load dataset, pick a random sample from the selected dataloader,
