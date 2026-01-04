@@ -39,6 +39,29 @@ class ConfigParser():
         return mult_input_config['gsd_m']
     
 #=============
+# OUTPUT CONFIG
+
+    def get_output_tensor_shape(self) -> tuple:
+        output_config = self.config['output_config']
+        return (
+            output_config['chanels'],
+            output_config['cols'],
+            output_config['rows'],
+        )
+
+    def get_output_cv2_shape(self) -> tuple:
+        output_config = self.config['output_config']
+        return (
+            output_config['cols'],
+            output_config['rows'],
+            output_config['chanels'],
+        )
+
+    def get_output_gsd_m(self) -> float:
+        output_config = self.config['output_config']
+        return output_config['gsd_m']
+    
+#=============
 # SENTINEL 2 CONFIG
 
     def get_sentinel_2_bands(self):

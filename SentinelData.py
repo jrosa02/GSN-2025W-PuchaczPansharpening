@@ -13,11 +13,12 @@ from pathlib import Path
 import pytest
 from typing import Tuple
 from ConfigParser import ConfigParser
+import sys
 
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("./logs/sentinel2_loader.log"),
@@ -64,6 +65,10 @@ def augment_tensor(data_tensor, crop_size, rotation_deg=45, noise_std=0.01):
 
     return data_tensor
 
+GeoBBOXs = {
+    "Poland": [14.124562, 49.002063, 24.145562, 54.835563],
+    "Paris": [2.2241, 48.8156, 2.4699, 48.9022],
+}
 
 # ========================================================================================================================
 
@@ -82,29 +87,41 @@ class Sentinel2DownLoader:
     save_tiff : bool, optional
         If True, save downloaded TIFFs locally
     download_folder : str, optional
-        Folder to save TIFFs if save_tiff=True
+        Dataset location
     normalize : bool, optional
         If True, normalize bands to 0–1
     """
-    
-    def __init__(self, bbox, time, bands=None, save_tiff=True, download_folder="sentinel2_data"):
+
+    def __init__(self, bbox, time, max_items: int | None = None, download_folder="dataset_sentinel"):
         logger.info("Initializing Sentinel2Loader")
         self.configparser = ConfigParser()
         self.bbox = bbox
         self.time = time
-        # self.bands = ["B02","B03","B04","B06","B08"]
-        # self.input_spatial_res_m = [10, 10, 10, 20, 10]
-        # self.imput_shapes = [(10980, 10980), (10980, 10980), (10980, 10980), (5490, 5490), (10980, 10980), ]
-        # self.output_spatial_res_m = 27
-        # # self.output_shape = (int(10980/2.7), int(10980/2.7))
-        # self.output_shape = (4096, 2048)
-        self.save_tiff = save_tiff
-        self.download_folder = download_folder
+        self.max_items = max_items
+        self.download_folder = Path(download_folder).resolve()
 
-        if self.save_tiff:
-            logger.info(f"Creating download folder: {self.download_folder}")
-            os.makedirs(self.download_folder, exist_ok=True)
+            # Log parameters
+        logger.info(
+            "Sentinel2Loader parameters:\n"
+            "  bbox: %s\n"
+            "  time range: %s\n"
+            "  max_items: %s\n"
+            "  download_folder: %s",
+            self.bbox,
+            self.time,
+            self.max_items if self.max_items is not None else "unlimited",
+            self.download_folder,
+        )
 
+        logger.info(f"Making dir structure at {self.download_folder}")
+        os.makedirs(self.download_folder/"input/", exist_ok=True)
+        os.makedirs(self.download_folder/"input/rgb/", exist_ok=True)
+        os.makedirs(self.download_folder/"input/mul/", exist_ok=True)
+        os.makedirs(self.download_folder/"output/", exist_ok=True)
+
+        self.stac_connect()
+    
+    def stac_connect(self):
         # Connect to STAC
         stac_url = "https://planetarycomputer.microsoft.com/api/stac/v1"
         logger.info(f"Connecting to STAC catalog: {stac_url}")
@@ -122,21 +139,10 @@ class Sentinel2DownLoader:
         self._download_index = 0
         logger.info(f"Found {len(self.items)} items.")
 
-    def __iter__(self):
-        return self
+    def stac_download(self, item):
 
-
-    def download_next(self):
-        if self._download_index >= len(self.items):
-            logger.info("No more items to iterate over")
-            raise StopIteration
-
-        item = self.items[self._download_index]
-        self._download_index += 1
         logger.info(f"Downloading item: {item.id}")
         signed_item = pc.sign(item)
-
-        # Read all bands at native resolution and keep profiles for optional save
         band_arrays = []
         band_profiles = []
         shapes = []
@@ -155,6 +161,20 @@ class Sentinel2DownLoader:
             band_arrays.append(data)
             band_profiles.append(profile)
             shapes.append(data.shape)  # (H, W)
+
+        return (band_arrays, band_profiles, shapes)
+
+    def download_next(self):
+        if self._download_index >= len(self.items) or \
+        (self.max_items is not None and self._download_index >= int(self.max_items)):
+            logger.info("No more items to iterate over")
+            raise StopIteration
+
+        item = self.items[self._download_index]
+        self._download_index += 1
+
+        # Read all bands at native resolution and keep profiles for optional save
+        band_arrays, band_profiles, shapes = self.stac_download(item)
 
         # Determine common (max) shape among bands so we only upsample smaller bands once
         heights = [s[0] for s in shapes]
@@ -175,14 +195,13 @@ class Sentinel2DownLoader:
                 t = F.interpolate(t, size=(common_h, common_w), mode=mode, align_corners=False if mode == "bilinear" else None)
                 # resulting shape: (1,1,common_h,common_w)
 
-            # squeeze batch dim -> (1, common_h, common_w)
             processed_tensors.append(t.squeeze(0))  # each is (1,Hc,Wc)
 
         # Stack to (C, Hc, Wc)
         stacked = torch.cat(processed_tensors, dim=0)  # (C, Hc, Wc) because processed_tensors are (1,Hc,Wc)
 
         # Final resize to TARGET_SHAPE in ONE call (only if needed)
-        target_h, target_w = self.configparser.get_mul_input_cv2_shape()[:2]
+        target_h, target_w = self.configparser.get_output_cv2_shape()[:2]
         if (common_h, common_w) != (target_h, target_w):
             # interpolate expects (N, C, H, W)
             stacked = F.interpolate(stacked.unsqueeze(0), size=(target_h, target_w), mode="area").squeeze(0)  # (C, target_h, target_w)
@@ -192,50 +211,57 @@ class Sentinel2DownLoader:
         final_np = stacked.cpu().numpy()  # (C, 1, H, W)
         final_torch = torch.from_numpy(final_np)        # preserve dtype/behavior similar to original
 
-        logger.debug(f"Completed processing item: {item.id}")
+        logger.info(f"Completed processing item: {item.id}")
         logger.debug(f"Item Shapes: {[t.shape for t in processed_tensors]}")
         return final_torch, item.id
 
-    
     def generate_target_tensor(self, sentinel_tensor):
         # sentinel_tensor is CHW (5,4096,2048)
         # select 4 MS bands (example: 1,2,3,4)
         ms_tensor = sentinel_tensor[1:, :, :]   # -> (4,4096,2048)
-        augmented = augment_tensor(ms_tensor, TARGET_SHAPE, noise_std=0)
+        augmented = augment_tensor(ms_tensor, self.configparser.get_mul_input_cv2_shape()   [:2], noise_std=0)
 
         return augmented  # (4,4096,2048)
 
     def generate_target_tensors(self, sentinel_tensor, n):
         return [self.generate_target_tensor(sentinel_tensor) for _ in range(n)]
-    
+
     def save_target_tensor(self, target_tensor, filename):
-        os.makedirs("./dataset_sentinel/output/", exist_ok=True)
-        torch.save(target_tensor, f"./dataset_sentinel/output/{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
+        torch.save(target_tensor, f"{self.download_folder}/output/{filename}.pt")
 
     def save_input_2tensor(self, input_2tensor, filename):
-        os.makedirs("./dataset_sentinel/input/", exist_ok=True)
-        os.makedirs("./dataset_sentinel/input/rgb/", exist_ok=True)
-        os.makedirs("./dataset_sentinel/input/mul/", exist_ok=True)
-        torch.save(input_2tensor[0], f"./dataset_sentinel/input/rgb/{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
-        torch.save(input_2tensor[1], f"./dataset_sentinel/input/mul/{filename}.pt", pickle_protocol=5, _use_new_zipfile_serialization=True)
+        torch.save(input_2tensor[0], f"{self.download_folder}/input/rgb/{filename}.pt")
+        torch.save(input_2tensor[1], f"{self.download_folder}/input/mul/{filename}.pt")
 
     def generate_input_2tensor(self, rgbms_tensor, target_tensor):
-         # rgbms_tensor = (5,4096,2048) original
-        # target_tensor = (4,4096,2048) output
+        rgb = rgbms_tensor[:3, :, :]
 
-        rgb = rgbms_tensor[:3, :, :]  # (3,4096,2048)
-
-        # Downsample MS to (4,2048,1024)
-        ms = target_tensor.unsqueeze(0)  # (1,4,4096,2048)
-        ms = F.interpolate(ms, size=(2048,1024), mode="area")  # (1,4,H,W)
+        # Downsample MS
+        ms = target_tensor.unsqueeze(0)  # (1,x, x, x)
+        ms = F.interpolate(ms, size=self.configparser.get_mul_input_tensor_shape()[1:], mode="area")  # (1,4,H,W)
         ms = ms.squeeze(0)
 
         return rgb, ms
-
+    
+    def __iter__(self):
+        self._count = 0
+        return self
+    
     def __next__(self):
-        sentinel_tensor, id = self.download_next()
+        # Enforce download quantity limit
+        if self.max_items is not None and self._count >= self.max_items:
+            logger.info("Reached maximum download count: %d", self.max_items)
+            raise StopIteration
+
+        try:
+            sentinel_tensor, id = self.download_next()
+        except StopIteration:
+            # Propagate natural exhaustion
+            raise
+
         logger.info(f"Generating target_tensors for: {id}")
         target_tensors = self.generate_target_tensors(sentinel_tensor, 1)
+
         for i, tensor in enumerate(target_tensors):
             new_id = str(id)+str(i)
             logger.debug(f"Generating input_tensors for: {new_id}")
@@ -243,36 +269,79 @@ class Sentinel2DownLoader:
             logger.debug(f"saving tensors: {new_id}")
             self.save_target_tensor(tensor, new_id)
             self.save_input_2tensor(input_2tensor, new_id)
-        
+
         logger.info(f"Saved target_tensors: {id}")
+        self._count += 1
 
 
 # ================================================================================================================================
-
 
 class SentinelDataset(Dataset):
-    def __init__(self) -> None:
+    def __init__(self, path: str | Path) -> None:
         super().__init__()
+        path = Path(path).resolve()
+
+        self.input_path_rgb = path / "input/rgb"
+        self.input_path_mul = path / "input/mul"
+        self.output_path = path / "output"
+
+        # Gather files
+        self.files_rgb = sorted(p for p in self.input_path_rgb.rglob("*") if p.is_file())
+        self.files_mul = sorted(p for p in self.input_path_mul.rglob("*") if p.is_file())
+        self.files_out = sorted(p for p in self.output_path.rglob("*") if p.is_file())
+
+        if not (len(self.files_rgb) and len(self.files_mul) and len(self.files_out)):
+            raise ValueError("Empty input directories or missing files.")
+
+        if not (len(self.files_rgb) == len(self.files_mul) == len(self.files_out)):
+            raise ValueError(
+                "Number of RGB, MUL and OUTPUT files must be equal and corresponding."
+            )
+
+        self.num_samples = len(self.files_rgb)
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __getitem__(self, index):
+        rgb = torch.load(str(self.files_rgb[index]), weights_only=False)
+        mul = torch.load(str(self.files_mul[index]), weights_only=False)
+        out = torch.load(str(self.files_out[index]), weights_only=False)
+
+        if rgb.ndim != 3 or mul.ndim != 3 or out.ndim != 3:
+            raise ValueError("Loaded tensors must be CHW format.")
+
+        return (rgb, mul), out
+
+    def produce_dataloaders(
+        self,
+        train_frac=0.7,
+        val_frac=0.2,
+        batch_size=32,
+        num_workers=2,
+        pin_memory=True,
+    ):
+        total_len = len(self)
+        train_len = int(train_frac * total_len)
+        val_len = int(val_frac * total_len)
+        test_len = total_len - train_len - val_len
+
+        train_ds, val_ds, test_ds = random_split(
+            self, [train_len, val_len, test_len]
+        )
+
+        return (
+            DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                       num_workers=num_workers, pin_memory=pin_memory),
+            DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                       num_workers=num_workers, pin_memory=pin_memory),
+            DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+                       num_workers=num_workers, pin_memory=pin_memory),
+        )
+
 
 # ================================================================================================================================
-
 class SentinelCroppedDataset(SentinelDataset):
-    """
-    Tile-based dataset created from saved CHW tensors on disk.
-
-    Expected stored tensor shapes:
-      - RGB:  (C_rgb, H_rgb, W_rgb)    (e.g. (3, 4096, 2048))
-      - MUL:  (C_mul, H_mul, W_mul)    (e.g. (4, 2048, 1024))
-      - OUT:  (C_out, H_out, W_out)    (e.g. (4, 4096, 2048))
-
-    Default cropping behavior (non-overlapping):
-      - RGB tiles -> (C_rgb, 256, 128)
-      - MUL tiles -> (C_mul, 128, 64)
-      - OUT tiles -> (C_out, 256, 128)
-
-    Tiles are aligned so that tile (r, c) in RGB ↔ tile (r, c) in MUL ↔ tile (r, c) in OUT.
-    """
-
     def __init__(
         self,
         path: str | Path,
@@ -280,48 +349,24 @@ class SentinelCroppedDataset(SentinelDataset):
         mul_crop: Tuple[int, int] = (128, 64),
         out_crop: Tuple[int, int] = (256, 128),
     ):
-        super().__init__()
-        path = Path(path)
-
-        self.input_path_rgb = path / "input/rgb"
-        self.input_path_mul = path / "input/mul"
-        self.output_path = path / "output"
+        super().__init__(path)
 
         self.rgb_crop_h, self.rgb_crop_w = rgb_crop
         self.mul_crop_h, self.mul_crop_w = mul_crop
         self.out_crop_h, self.out_crop_w = out_crop
 
+        self.index_map = []
         self.num_samples = 0
 
-        # Gather files
-        self.files_rgb = [p for p in self.input_path_rgb.rglob("*") if p.is_file()]
-        self.files_mul = [p for p in self.input_path_mul.rglob("*") if p.is_file()]
-        self.files_out = [p for p in self.output_path.rglob("*") if p.is_file()]
-
-        if not (len(self.files_rgb) and len(self.files_mul) and len(self.files_out)):
-            raise ValueError("Empty input directories or missing files.")
-
-        if not (len(self.files_rgb) == len(self.files_mul) == len(self.files_out)):
-            raise ValueError("Number of RGB, MUL and OUTPUT files must be equal and corresponding by order.")
-
-        # Precompute index mapping (dataset index -> (image_index, tile_row, tile_col))
-        self.index_map = []
-
-        for img_idx, (rgb_file, mul_file, out_file) in enumerate(zip(self.files_rgb, self.files_mul, self.files_out)):
-            # Load minimal metadata only (here we load the tensor but do not keep it in memory)
-            rgb = torch.load(str(rgb_file), weights_only=False)
-            mul = torch.load(str(mul_file), weights_only=False)
-            out = torch.load(str(out_file), weights_only=False)
-
-            # Validate shapes are CHW
-            if rgb.ndim != 3 or mul.ndim != 3 or out.ndim != 3:
-                raise ValueError(f"Files {rgb_file}, {mul_file} or {out_file} do not contain 3D CHW tensors.")
+        for img_idx in range(len(self.files_rgb)):
+            rgb = torch.load(str(self.files_rgb[img_idx]), weights_only=False)
+            mul = torch.load(str(self.files_mul[img_idx]), weights_only=False)
+            out = torch.load(str(self.files_out[img_idx]), weights_only=False)
 
             _, H_rgb, W_rgb = rgb.shape
             _, H_mul, W_mul = mul.shape
             _, H_out, W_out = out.shape
 
-            # Determine how many tiles in each axis (floor division -> remainder truncated)
             tiles_h_rgb = H_rgb // self.rgb_crop_h
             tiles_w_rgb = W_rgb // self.rgb_crop_w
 
@@ -331,24 +376,21 @@ class SentinelCroppedDataset(SentinelDataset):
             tiles_h_out = H_out // self.out_crop_h
             tiles_w_out = W_out // self.out_crop_w
 
-            # Ensure tile grid counts match between RGB / MUL / OUT
-            if not (tiles_h_rgb == tiles_h_mul == tiles_h_out and tiles_w_rgb == tiles_w_mul == tiles_w_out):
+            if not (
+                tiles_h_rgb == tiles_h_mul == tiles_h_out
+                and tiles_w_rgb == tiles_w_mul == tiles_w_out
+            ):
                 raise ValueError(
-                    f"Tile grid mismatch for image index {img_idx}:\n"
-                    f"RGB tiles (h,w)=({tiles_h_rgb},{tiles_w_rgb}), "
-                    f"MUL tiles=({tiles_h_mul},{tiles_w_mul}), OUT tiles=({tiles_h_out},{tiles_w_out}).\n"
-                    "Ensure the stored images sizes are consistent and divisible by respective crop sizes "
-                    "or choose crop sizes that align across inputs."
+                    f"Tile grid mismatch for image: {img_idx}, values: {tiles_h_rgb, tiles_h_mul, tiles_h_out, tiles_w_rgb, tiles_w_mul, tiles_w_out}."
                 )
 
-            # Append mapping entries (row-major order)
             for th in range(tiles_h_rgb):
-                self.num_samples = self.num_samples + 1
                 for tw in range(tiles_w_rgb):
                     self.index_map.append((img_idx, th, tw))
+                    self.num_samples += 1
 
-        if len(self.index_map) == 0:
-            raise ValueError("No tiles were produced — check image and crop sizes.")
+        if self.num_samples == 0:
+            raise ValueError("No tiles were produced.")
 
     def __len__(self) -> int:
         return self.num_samples
@@ -356,72 +398,53 @@ class SentinelCroppedDataset(SentinelDataset):
     def __getitem__(self, index):
         img_idx, tile_row, tile_col = self.index_map[index]
 
-        rgb_file = self.files_rgb[img_idx]
-        mul_file = self.files_mul[img_idx]
-        out_file = self.files_out[img_idx]
+        rgb = torch.load(str(self.files_rgb[img_idx]), weights_only=False)
+        mul = torch.load(str(self.files_mul[img_idx]), weights_only=False)
+        out = torch.load(str(self.files_out[img_idx]), weights_only=False)
 
-        # Load full tensors (CHW)
-        rgb = torch.load(str(rgb_file), weights_only=False)   # (C_rgb, H_rgb, W_rgb)
-        mul = torch.load(str(mul_file), weights_only=False)   # (C_mul, H_mul, W_mul)
-        out = torch.load(str(out_file), weights_only=False)   # (C_out, H_out, W_out)
-
-        # Compute crop coordinates for RGB / OUT (they share crop size)
         top_rgb = tile_row * self.rgb_crop_h
         left_rgb = tile_col * self.rgb_crop_w
-        rgb_crop = rgb[:, top_rgb : top_rgb + self.rgb_crop_h, left_rgb : left_rgb + self.rgb_crop_w]
+        rgb_crop = rgb[:, top_rgb:top_rgb + self.rgb_crop_h,
+                          left_rgb:left_rgb + self.rgb_crop_w]
 
-        out_crop = out[:, top_rgb : top_rgb + self.out_crop_h, left_rgb : left_rgb + self.out_crop_w]
-
-        # Compute crop coordinates for MUL
         top_mul = tile_row * self.mul_crop_h
         left_mul = tile_col * self.mul_crop_w
-        mul_crop = mul[:, top_mul : top_mul + self.mul_crop_h, left_mul : left_mul + self.mul_crop_w]
+        mul_crop = mul[:, top_mul:top_mul + self.mul_crop_h,
+                          left_mul:left_mul + self.mul_crop_w]
 
-        # Final sanity checks (shapes)
-        if rgb_crop.shape[1:] != (self.rgb_crop_h, self.rgb_crop_w):
-            raise RuntimeError(f"RGB crop has unexpected size: {rgb_crop.shape}")
-        if mul_crop.shape[1:] != (self.mul_crop_h, self.mul_crop_w):
-            raise RuntimeError(f"MUL crop has unexpected size: {mul_crop.shape}")
-        if out_crop.shape[1:] != (self.out_crop_h, self.out_crop_w):
-            raise RuntimeError(f"OUT crop has unexpected size: {out_crop.shape}")
+        out_crop = out[:, top_rgb:top_rgb + self.out_crop_h,
+                          left_rgb:left_rgb + self.out_crop_w]
 
         return (rgb_crop, mul_crop), out_crop
-
-    def produce_dataloaders(self, train_frac=0.7, val_frac=0.2, batch_size=32, num_workers=2, pin_memory=True):
-        total_len = len(self)
-        train_len = int(train_frac * total_len)
-        val_len = int(val_frac * total_len)
-        test_len = total_len - train_len - val_len
-
-        train_ds, val_ds, test_ds = random_split(self, [train_len, val_len, test_len])
-
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                                  num_workers=num_workers, pin_memory=pin_memory)
-        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                                num_workers=num_workers, pin_memory=pin_memory)
-        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                                 num_workers=num_workers, pin_memory=pin_memory)
-
-        return train_loader, val_loader, test_loader
 
 
 # ====================================================================================================
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        raise RuntimeError(
+            "Missing argument: max_items\n"
+            "Usage: python ./SentinelData.py <max_items>"
+    )
+
+    try:
+        max_items = int(sys.argv[1])
+    except ValueError:
+        raise RuntimeError("max_items must be an integer")
+
     logger.info("Starting Sentinel2Loader main execution")
     loader = Sentinel2DownLoader(
-        bbox=[2.2241, 48.8156, 2.4699, 48.9022],
+        bbox=GeoBBOXs["Poland"],
         time="2024-01-01/2024-12-31",
-        save_tiff=False
+        max_items=max_items
     )
 
     i = 0
 
     for image in loader:
-        if i > 1: break
         i = i + 1
 
-    data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
+    data_path = Path("./dataset_sentinel/")
     dataset = SentinelCroppedDataset(data_path)
     train_loader, val_loader, test_loader = dataset.produce_dataloaders()
 
@@ -430,32 +453,30 @@ if __name__ == "__main__":
 
 def test_sentinel2downloader_init():
     loader = Sentinel2DownLoader(
-        bbox=[2.2241, 48.8156, 2.4699, 48.9022],
+        bbox=GeoBBOXs["Paris"],
         time="2024-01-01/2024-12-31",
-        save_tiff=False
     )
 
-def test_sentinel2downloader_download():
-    loader = Sentinel2DownLoader(
-        bbox=[2.2241, 48.8156, 2.4699, 48.9022],
-        time="2024-01-01/2024-12-31",
-        save_tiff=True
-    )
+# ----- SentinelDataset -------------------------------------------------------------------
+@pytest.fixture
+def full_dataset():
+    data_path = "./dataset_sentinel/"
+    return SentinelDataset(data_path)
 
-    tensor, id = loader.download_next()
+def test_full_shapes(full_dataset):
+    config = ConfigParser()
+
+    (x_rgb, x_mul), y = full_dataset[0]
+
+    assert x_rgb.shape == config.get_rgb_input_tensor_shape(), f"rgb expected:{config.get_rgb_input_tensor_shape()} != {x_rgb.shape}"
+    assert x_mul.shape == config.get_mul_input_tensor_shape(), f"mul expected:{config.get_mul_input_tensor_shape()} != {x_mul.shape}"
+    assert y.shape[1:] == x_rgb.shape[1:], "out"
 
 # ----- SentinelCroppedDataset -------------------------------------------------------------------
 @pytest.fixture
 def cropped_dataset():
-    data_path = Path("/home/karolina/studia/GSN-2025W-PuchaczPansharpening/dataset_sentinel/")
+    data_path = "./dataset_sentinel/"
     return SentinelCroppedDataset(data_path)
-
-def test_cropped_dataset_len(cropped_dataset):
-    # Expect 16 crops: (1024/256) × (512/128) = 4×4 = 16
-    # For each image (currently: 11 images)
-    # So 16x11 = 176
-    assert len(cropped_dataset) == 176
-
 
 def test_cropped_shapes(cropped_dataset):
     (x_rgb, x_mul), y = cropped_dataset[0]

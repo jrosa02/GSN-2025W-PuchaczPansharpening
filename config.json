@@ -2,15 +2,15 @@
     "rgb_input_config":
     {
         "gsd_m": 27,
-        "rows":100000,
-        "cols":100000,
+        "rows":2048,
+        "cols":2048,
         "chanels":3
     },
     "multispectral_input_config":
     {
         "gsd_m": 54,
-        "rows":50000,
-        "cols":50000,
+        "rows":1024,
+        "cols":1024,
         "chanels":4
     },
     "sentinel2_l2a_config":
@@ -23,8 +23,17 @@
             {"band": "B08", "gsd_m": 10, "shape": [10980, 10980]}
         ]
     },
+    "output_config":
+    {
+        "gsd_m": 27,
+        "rows":2048,
+        "cols":2048,
+        "chanels":5
+    },
 
     "system_storage_size_cap_GB": 100,
 
-    "num_workers": 16
+    "traininig":{
+        "num_workers": 16
+    }
 }
