@@ -40,7 +40,7 @@
     "system_storage_size_cap_GB": 100,
 
     "traininig":{
-        "num_workers": 4,
+        "num_workers": 16,
         "dropouts": [0, 0.2, 0.5]
     }
 }

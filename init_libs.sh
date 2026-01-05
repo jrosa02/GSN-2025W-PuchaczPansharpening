@@ -43,9 +43,9 @@ fi
 # Install PyTorch
 # -------------------------------
 if [ "$GPU_PRESENT" = true ]; then
-    $INSTALLER install torch torchvision torchaudio --upgrade
+    $INSTALLER install torch torchvision torchaudio
 else
-    $INSTALLER install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --upgrade
+    $INSTALLER install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 fi
 
 # -------------------------------
