@@ -56,7 +56,7 @@ class Training(ABC):
         self.trainer = pl.Trainer(
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
             devices=1,
-            max_epochs=1,
+            max_epochs=1000,
             precision=32,
             callbacks=[
                 ModelCheckpoint(
