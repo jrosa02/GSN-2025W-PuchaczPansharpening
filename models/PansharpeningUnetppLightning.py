@@ -5,9 +5,7 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from torchview import draw_graph
-import torch
-from lightning_utilities.core.rank_zero import rank_zero_warn
-import torch
+import numpy as np
 
 class ConvBlock(nn.Module):
     def __init__(self, in_ch, out_ch, dropout_prob=0.0):
@@ -75,42 +73,23 @@ class Decoder(nn.Module):
         return self.out_conv(x)
 
 
-def normalize(x, mean, std):
-    return (x - mean[None, :, None, None]) / std[None, :, None, None]
+def normalize(x, max = np.iinfo(np.uint16).max):
+    return x/float(max)
 
 
-def denormalize(x, mean, std):
-    return x * std[None, :, None, None] + mean[None, :, None, None]
+def denormalize(x, max = np.iinfo(np.uint16).max):
+    return x*float(max)
 
 
 class PanSharpenUnetppLightning(pl.LightningModule):
     def __init__(
             self,
-            rgb_mean=None,
-            rgb_std=None,
-            ms_mean=None,
-            ms_std=None,
             base_ch=32,
             lr=1e-4,
             dropout_prob=0.0,  # Add dropout probability parameter
         ):
         super().__init__()
-        self.save_hyperparameters(ignore=["rgb_mean", "rgb_std", "ms_mean", "ms_std"])
-
-        # Defaults if loading from checkpoint
-        if rgb_mean is None:
-            rgb_mean = torch.zeros(3)
-        if rgb_std is None:
-            rgb_std = torch.ones(3)
-        if ms_mean is None:
-            ms_mean = torch.zeros(4)
-        if ms_std is None:
-            ms_std = torch.ones(4)
-
-        self.register_buffer("rgb_mean", torch.as_tensor(rgb_mean))
-        self.register_buffer("rgb_std",  torch.as_tensor(rgb_std))
-        self.register_buffer("ms_mean",  torch.as_tensor(ms_mean))
-        self.register_buffer("ms_std",   torch.as_tensor(ms_std))
+        self.save_hyperparameters()
 
         self.rgb_encoder = Encoder(3, base_ch, dropout_prob)
         self.ms_encoder  = Encoder(4, base_ch, dropout_prob)
@@ -128,8 +107,8 @@ class PanSharpenUnetppLightning(pl.LightningModule):
 
     def forward(self, rgb, ms_lr):
         # --- Normalize inputs ---
-        rgb = normalize(rgb, self.rgb_mean, self.rgb_std)
-        ms_lr = normalize(ms_lr, self.ms_mean, self.ms_std)
+        rgb = normalize(rgb)
+        ms_lr = normalize(ms_lr)
 
         # Upsample MS to RGB resolution
         ms_up = F.interpolate(ms_lr, size=rgb.shape[-2:], mode="bilinear", align_corners=False)
@@ -151,7 +130,7 @@ class PanSharpenUnetppLightning(pl.LightningModule):
     def training_step(self, batch):
         (rgb, ms_lr), ms_hr = batch
         # Normalize GT MS
-        ms_hr_norm = normalize(ms_hr, self.ms_mean, self.ms_std)
+        ms_hr_norm = normalize(ms_hr)
         pred_norm = self(rgb, ms_lr)
         loss = self.loss_fn(pred_norm, ms_hr_norm)
         self.log("train_l1", loss, prog_bar=True)
@@ -160,7 +139,7 @@ class PanSharpenUnetppLightning(pl.LightningModule):
     def validation_step(self, batch):
         # During validation, dropout is automatically disabled
         (rgb, ms_lr), ms_hr = batch
-        ms_hr_norm = normalize(ms_hr, self.ms_mean, self.ms_std)
+        ms_hr_norm = normalize(ms_hr)
         pred_norm = self(rgb, ms_lr)
         loss = self.loss_fn(pred_norm, ms_hr_norm)
         self.log("val_l1", loss, prog_bar=True)
@@ -170,7 +149,7 @@ class PanSharpenUnetppLightning(pl.LightningModule):
         (rgb, ms_lr), ms_hr = batch
         pred_norm = self(rgb, ms_lr)
         # Denormalize output for inference
-        pred = denormalize(pred_norm, self.ms_mean, self.ms_std)
+        pred = denormalize(pred_norm)
         return pred
 
     def configure_optimizers(self):

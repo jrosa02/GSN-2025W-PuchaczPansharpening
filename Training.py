@@ -10,43 +10,6 @@ from math import sqrt
 
 import torch
 
-def compute_stats(dataloader, device="cpu"):
-    # Use float64 accumulation to avoid precision loss
-    rgb_sum = torch.zeros(3, dtype=torch.float64, device=device)
-    rgb_sq  = torch.zeros(3, dtype=torch.float64, device=device)
-    ms_sum  = torch.zeros(4, dtype=torch.float64, device=device)
-    ms_sq   = torch.zeros(4, dtype=torch.float64, device=device)
-    n_pixels = 0
-
-    for (rgb, ms_lr), _ in dataloader:
-        # Move batch to device and convert to float64 for stability
-        rgb = rgb.to(device, dtype=torch.float64)
-        ms_lr = ms_lr.to(device, dtype=torch.float64)
-
-        b, c_rgb, h, w = rgb.shape
-        _, c_ms, _, _ = ms_lr.shape
-
-        # Number of pixels in batch
-        batch_pixels = b * h * w
-        n_pixels += batch_pixels
-
-        # Sum over batch & spatial dimensions
-        rgb_sum += rgb.sum(dim=[0, 2, 3])
-        rgb_sq  += (rgb ** 2).sum(dim=[0, 2, 3])
-
-        ms_sum += ms_lr.sum(dim=[0, 2, 3])
-        ms_sq  += (ms_lr ** 2).sum(dim=[0, 2, 3])
-
-    # Compute mean and std
-    rgb_mean = (rgb_sum / n_pixels).float()
-    rgb_std  = ((rgb_sq / n_pixels - (rgb_sum / n_pixels) ** 2).sqrt()).float()
-
-    ms_mean = (ms_sum / n_pixels).float()
-    ms_std  = ((ms_sq / n_pixels - (ms_sum / n_pixels) ** 2).sqrt()).float()
-
-    return rgb_mean, rgb_std, ms_mean, ms_std
-
-
 class Training(ABC):
     @abstractmethod
     def __init__(self, dropout = 0) -> None:
@@ -97,11 +60,9 @@ class PanSharpenUnetppLightningTraining(Training):
     def _init_dataset(self):
         self.dataset = SentinelCroppedDataset("./dataset_sentinel")
         self.dataloaders = self.dataset.produce_dataloaders() #train, val, test
-        self.normalization_params = compute_stats(self.dataloaders[0]) # rgb_mean, rgb_std, ms_mean, ms_std
 
     def _init_model(self):
-        rgb_mean, rgb_std, ms_mean, ms_std = self.normalization_params
-        self.model = PanSharpenUnetppLightning(rgb_mean, rgb_std, ms_mean, ms_std, base_ch=32, lr=1e-4, dropout_prob=self.dropout_prob)
+        self.model = PanSharpenUnetppLightning(base_ch=32, lr=1e-4, dropout_prob=self.dropout_prob)
 
     def fit(self):
         self.trainer.fit(self.model, self.dataloaders[0], self.dataloaders[1])
