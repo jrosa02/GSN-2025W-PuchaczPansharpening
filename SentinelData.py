@@ -14,6 +14,7 @@ import pytest
 from typing import Tuple
 from ConfigParser import ConfigParser
 import sys
+from functools import lru_cache
 
 
 logger = logging.getLogger(__name__)
@@ -334,6 +335,7 @@ class SentinelDataset(Dataset):
 
 
 # ================================================================================================================================
+
 class SentinelCroppedDataset(SentinelDataset):
     def __init__(
         self,
@@ -341,6 +343,7 @@ class SentinelCroppedDataset(SentinelDataset):
         rgb_crop: Tuple[int, int] | None = None,
         mul_crop: Tuple[int, int] | None = None,
         out_crop: Tuple[int, int] | None = None,
+        cache_size: int = 4,  # Number of images to cache per worker
     ):
         super().__init__(path)
 
@@ -357,61 +360,123 @@ class SentinelCroppedDataset(SentinelDataset):
         self.mul_crop_h, self.mul_crop_w = mul_crop
         self.out_crop_h, self.out_crop_w = out_crop
 
-        self.index_map = []
-        self.num_samples = 0
-
-        rgb = torch.load(str(self.files_rgb[0]), weights_only=False)
-        mul = torch.load(str(self.files_mul[0]), weights_only=False)
-        out = torch.load(str(self.files_out[0]), weights_only=False)
-
+        # Load just the first image to get dimensions
+        rgb = torch.load(str(self.files_rgb[0]), weights_only=False, map_location='cpu')
         _, H_rgb, W_rgb = rgb.shape
-        _, H_mul, W_mul = mul.shape
-        _, H_out, W_out = out.shape
-
-        tiles_h_rgb = H_rgb // self.rgb_crop_h
-        tiles_w_rgb = W_rgb // self.rgb_crop_w
-
-        for img_idx in range(len(self.files_rgb)):
-
-            for th in range(tiles_h_rgb):
-                for tw in range(tiles_w_rgb):
-                    self.index_map.append((img_idx, th, tw))
-                    self.num_samples += 1
-
-        if self.num_samples == 0:
-            raise ValueError("No tiles were produced.")
         
-    def is_blank_image(self, tensor: torch.Tensor, std_threshold=1.0):
-        return tensor.std() < std_threshold
+        # Calculate total tiles per image
+        self.tiles_h = H_rgb // self.rgb_crop_h
+        self.tiles_w = W_rgb // self.rgb_crop_w
+        self.tiles_per_image = self.tiles_h * self.tiles_w
+        
+        # Build index map: simple sequential mapping
+        self.num_samples = len(self.files_rgb) * self.tiles_per_image
+        
+        # Cache size per worker
+        self.cache_size = cache_size
 
     def __len__(self) -> int:
         return self.num_samples
 
     def __getitem__(self, index):
-        img_idx, tile_row, tile_col = self.index_map[index]
-
-        rgb = torch.load(str(self.files_rgb[img_idx]), weights_only=False)
-        mul = torch.load(str(self.files_mul[img_idx]), weights_only=False)
-        out = torch.load(str(self.files_out[img_idx]), weights_only=False)
-
+        # Calculate which image and tile this index refers to
+        img_idx = index // self.tiles_per_image
+        tile_idx = index % self.tiles_per_image
+        tile_row = tile_idx // self.tiles_w
+        tile_col = tile_idx % self.tiles_w
+        
+        # Use the worker's own cache (simple LRU cache)
+        # Each DataLoader worker will have its own instance of this cache
+        rgb, mul, out = self._get_cached_tensors(img_idx)
+        
+        # Calculate crop positions
         top_rgb = tile_row * self.rgb_crop_h
         left_rgb = tile_col * self.rgb_crop_w
-        rgb_crop = rgb[:, top_rgb:top_rgb + self.rgb_crop_h,
-                          left_rgb:left_rgb + self.rgb_crop_w]
-
         top_mul = tile_row * self.mul_crop_h
         left_mul = tile_col * self.mul_crop_w
+        
+        # Extract crops
+        rgb_crop = rgb[:, top_rgb:top_rgb + self.rgb_crop_h,
+                          left_rgb:left_rgb + self.rgb_crop_w]
+        
         mul_crop = mul[:, top_mul:top_mul + self.mul_crop_h,
                           left_mul:left_mul + self.mul_crop_w]
-
+        
         out_crop = out[:, top_rgb:top_rgb + self.out_crop_h,
                           left_rgb:left_rgb + self.out_crop_w]
-
+        
         return (rgb_crop, mul_crop), out_crop
+    
+    # Simple cache using Python's lru_cache - each worker gets its own cache
+    @lru_cache(maxsize=5)  # Default cache size of 4 images per worker
+    def _load_tensors(self, img_idx: int):
+        """Load and cache tensors for an image"""
+        rgb = torch.load(str(self.files_rgb[img_idx]), weights_only=False, map_location='cpu')
+        mul = torch.load(str(self.files_mul[img_idx]), weights_only=False, map_location='cpu')
+        out = torch.load(str(self.files_out[img_idx]), weights_only=False, map_location='cpu')
+        
+        if rgb.ndim != 3 or mul.ndim != 3 or out.ndim != 3:
+            raise ValueError("Loaded tensors must be CHW format.")
+            
+        return rgb, mul, out
+    
+    def _get_cached_tensors(self, img_idx: int):
+        """Wrapper to use the cache"""
+        return self._load_tensors(img_idx)
+    
+    def produce_dataloaders(
+        self,
+        train_frac=0.7,
+        val_frac=0.2,
+        batch_size=32,
+        pin_memory=torch.cuda.is_available()
+    ):
+        num_workers = self.config.get_training_num_workers()
+        
+        # IMPORTANT: With caching, each worker needs its own dataset instance
+        # We'll create separate instances for each split
+        
+        total_len = len(self)
+        train_len = int(train_frac * total_len)
+        val_len = int(val_frac * total_len)
+        test_len = total_len - train_len - val_len
+        
+        # Get indices for splits
+        indices = torch.randperm(total_len).tolist()
+        train_indices = indices[:train_len]
+        val_indices = indices[train_len:train_len + val_len]
+        test_indices = indices[train_len + val_len:]
+        
+        # Create subset datasets with their own caches
+        train_ds = torch.utils.data.Subset(self, train_indices)
+        val_ds = torch.utils.data.Subset(self, val_indices)
+        test_ds = torch.utils.data.Subset(self, test_indices)
+        
+        # Use persistent_workers=True to keep workers alive between epochs
+        return (
+            DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                       num_workers=num_workers, pin_memory=pin_memory,
+                       persistent_workers=True if num_workers > 0 else False),
+            DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                       num_workers=num_workers, pin_memory=pin_memory,
+                       persistent_workers=True if num_workers > 0 else False),
+            DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+                       num_workers=num_workers, pin_memory=pin_memory,
+                       persistent_workers=True if num_workers > 0 else False),
+        )
 
 
 # ====================================================================================================
-
+# import cProfile
+# def profileDataloader():
+#     dataset = SentinelCroppedDataset("./dataset_sentinel")
+    
+#     for (x_rgb, x_mul), y in dataset:
+#         pass
+    
+# if __name__ == "__main__":
+#     cProfile.run('profileDataloader()', sort='cumtime', filename="sentinel_loader")
+    
 if __name__ == "__main__":
 
     # Configure logging

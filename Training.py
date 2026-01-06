@@ -2,22 +2,24 @@ from ConfigParser import ConfigParser
 from SentinelData import SentinelCroppedDataset
 from abc import ABC, abstractmethod
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, ProgressBar
 import torch.nn.functional as  F
 import torch
 from models.PansharpeningUnetppLightning import PanSharpenUnetppLightning
-from math import sqrt
 
-import torch
+import cProfile
+import traceback
+import sys
 
 class Training(ABC):
     @abstractmethod
     def __init__(self, dropout = 0) -> None:
         self.dropout_prob = dropout
+        self.config = ConfigParser()
 
     def _init_trainer(self):
         self.trainer = pl.Trainer(
-            accelerator="gpu" if torch.cuda.is_available() else "cpu",
+            accelerator= "cpu", #"gpu" if torch.cuda.is_available() else "cpu",
             devices=1,
             max_epochs=1000,
             precision=32,
@@ -32,10 +34,14 @@ class Training(ABC):
                         "-{epoch:03d}-{val_l1:.4f}"
                     ),
                     save_on_exception=True,
+                    every_n_epochs=5,  # Save less often
+                    save_on_train_epoch_end=False,  # Save after validation
                 ),
-                EarlyStopping(monitor="val_l1", patience=50, mode="min"),
+                EarlyStopping(monitor="val_l1", 
+                              patience=50, mode="min", 
+                              check_on_train_epoch_end=False),
             ],
-            log_every_n_steps=4,
+            log_every_n_steps=256
         )
 
     @abstractmethod
@@ -59,7 +65,7 @@ class PanSharpenUnetppLightningTraining(Training):
 
     def _init_dataset(self):
         self.dataset = SentinelCroppedDataset("./dataset_sentinel")
-        self.dataloaders = self.dataset.produce_dataloaders() #train, val, test
+        self.dataloaders = self.dataset.produce_dataloaders(batch_size=self.config.get_training_batchsize()) #train, val, test
 
     def _init_model(self):
         self.model = PanSharpenUnetppLightning(base_ch=32, lr=1e-4, dropout_prob=self.dropout_prob)
@@ -78,11 +84,13 @@ class TrainingList:
         for training in self.training_list:
             training.fit()
 
+
 if __name__ == "__main__":
 
+    torch.set_float32_matmul_precision('high')
     trainingList = TrainingList()
 
-    for drp in [0]:
+    for drp in [0, 0.5]:
         training = PanSharpenUnetppLightningTraining(drp)
         trainingList.append(training)
 

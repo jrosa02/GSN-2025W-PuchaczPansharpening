@@ -75,6 +75,10 @@ class ConfigParser():
         training_config = self.config['traininig']
         return training_config['num_workers']
 
+    def get_training_batchsize(self) -> int:
+        training_config = self.config['traininig']
+        return training_config['batch_size']
+
 #=============
 # CHUNKINMG CONFIG
 
