@@ -16,16 +16,6 @@ from ConfigParser import ConfigParser
 import sys
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("./logs/sentinel2_loader.log"),
-        logging.StreamHandler()
-    ]
-)
-
 logger = logging.getLogger(__name__)
 
 def augment_tensor(data_tensor, crop_size, rotation_deg=45, noise_std=0.01):
@@ -320,7 +310,7 @@ class SentinelDataset(Dataset):
         train_frac=0.7,
         val_frac=0.2,
         batch_size=32,
-        pin_memory=True,
+        pin_memory=torch.cuda.is_available()
     ):
         num_workers = self.config.get_training_num_workers()
 
@@ -370,31 +360,18 @@ class SentinelCroppedDataset(SentinelDataset):
         self.index_map = []
         self.num_samples = 0
 
+        rgb = torch.load(str(self.files_rgb[0]), weights_only=False)
+        mul = torch.load(str(self.files_mul[0]), weights_only=False)
+        out = torch.load(str(self.files_out[0]), weights_only=False)
+
+        _, H_rgb, W_rgb = rgb.shape
+        _, H_mul, W_mul = mul.shape
+        _, H_out, W_out = out.shape
+
+        tiles_h_rgb = H_rgb // self.rgb_crop_h
+        tiles_w_rgb = W_rgb // self.rgb_crop_w
+
         for img_idx in range(len(self.files_rgb)):
-            rgb = torch.load(str(self.files_rgb[img_idx]), weights_only=False)
-            mul = torch.load(str(self.files_mul[img_idx]), weights_only=False)
-            out = torch.load(str(self.files_out[img_idx]), weights_only=False)
-
-            _, H_rgb, W_rgb = rgb.shape
-            _, H_mul, W_mul = mul.shape
-            _, H_out, W_out = out.shape
-
-            tiles_h_rgb = H_rgb // self.rgb_crop_h
-            tiles_w_rgb = W_rgb // self.rgb_crop_w
-
-            tiles_h_mul = H_mul // self.mul_crop_h
-            tiles_w_mul = W_mul // self.mul_crop_w
-
-            tiles_h_out = H_out // self.out_crop_h
-            tiles_w_out = W_out // self.out_crop_w
-
-            if not (
-                tiles_h_rgb == tiles_h_mul == tiles_h_out
-                and tiles_w_rgb == tiles_w_mul == tiles_w_out
-            ):
-                raise ValueError(
-                    f"Tile grid mismatch for image: {img_idx}, values: {tiles_h_rgb, tiles_h_mul, tiles_h_out, tiles_w_rgb, tiles_w_mul, tiles_w_out}."
-                )
 
             for th in range(tiles_h_rgb):
                 for tw in range(tiles_w_rgb):
@@ -436,6 +413,17 @@ class SentinelCroppedDataset(SentinelDataset):
 # ====================================================================================================
 
 if __name__ == "__main__":
+
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler("./logs/sentinel2_loader.log"),
+            logging.StreamHandler()
+        ]
+    )
+
     if len(sys.argv) < 2:
         raise RuntimeError(
             "Missing argument: max_items\n"

@@ -57,28 +57,28 @@ class Training(ABC):
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
             devices=1,
             max_epochs=1,
-            precision=16,
+            precision=32,
             callbacks=[
                 ModelCheckpoint(
                     monitor="val_l1",
                     save_top_k=1,
                     mode="min",
-                    filename="{self.__class__.__name__:s}-drop-{self.dropout_prob:.1f}-{epoch:03d}-{val_l1:.4f}",
-                    save_on_exception=True
+                    filename=(
+                        f"{self.__class__.__name__}"
+                        f"-drop-{self.dropout_prob:.1f}"
+                        "-{epoch:03d}-{val_l1:.4f}"
+                    ),
+                    save_on_exception=True,
                 ),
-                EarlyStopping(
-                    monitor="val_l1",
-                    patience=50,
-                    mode="min"
-                )
+                EarlyStopping(monitor="val_l1", patience=50, mode="min"),
             ],
-            log_every_n_steps=4
+            log_every_n_steps=4,
         )
 
     @abstractmethod
     def _init_dataset(self):
         pass
-    
+
     @abstractmethod
     def _init_model(self):
         pass
@@ -121,7 +121,7 @@ if __name__ == "__main__":
 
     trainingList = TrainingList()
 
-    for drp in [0, 0.2, 0.5]:
+    for drp in [0]:
         training = PanSharpenUnetppLightningTraining(drp)
         trainingList.append(training)
 
