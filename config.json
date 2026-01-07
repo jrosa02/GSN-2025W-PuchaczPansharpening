@@ -33,15 +33,15 @@
 
     "chunking_config":
     {
-        "chunk_shape": [64, 64],
+        "chunk_shape": [256, 256],
         "margin_size": [16, 16]
     },
 
     "system_storage_size_cap_GB": 100,
 
     "traininig":{
-        "num_workers": 64,
-        "batch_size": 8,
+        "num_workers": 32,
+        "batch_size": 4,
         "max_epochs": 1000,
         "dropouts": [0, 0.2, 0.5]
     }

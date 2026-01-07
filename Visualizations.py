@@ -5,6 +5,8 @@ import random
 import torch
 import torch.nn.functional as  F
 
+from models.PansharpeningUnetppLightning import denormalize
+
 # ---------------------------------------------------------
 # Utility: Display multispectral tensor as a grid of bands
 # ---------------------------------------------------------
@@ -128,9 +130,7 @@ def plot_pansharpen_examples(
         # Forward
         pred_norm = model(rgb, ms_lr)
         pred = (
-            pred_norm
-            * model.ms_std[None, :, None, None]
-            + model.ms_mean[None, :, None, None]
+            denormalize(pred_norm)
         )
 
         # Upsample MS input for visualization

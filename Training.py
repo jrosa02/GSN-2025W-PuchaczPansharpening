@@ -19,7 +19,7 @@ class Training(ABC):
 
     def _init_trainer(self):
         self.trainer = pl.Trainer(
-            accelerator= "cpu", #"gpu" if torch.cuda.is_available() else "cpu",
+            accelerator= "gpu" if torch.cuda.is_available() else "cpu",
             devices=1,
             max_epochs=1000,
             precision=32,
