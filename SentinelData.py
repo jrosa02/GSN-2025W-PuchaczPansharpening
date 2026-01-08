@@ -58,6 +58,7 @@ def augment_tensor(data_tensor, crop_size, rotation_deg=45, noise_std=0.01):
 
 GeoBBOXs = {
     "Poland": [14.124562, 49.002063, 24.145562, 54.835563],
+    "Poland_with_bounds": [9.086269710379241, 47.900026791895904, 27.30727373945674, 54.21477439048045],
     "Paris": [2.2241, 48.8156, 2.4699, 48.9022],
 }
 
@@ -124,7 +125,7 @@ class Sentinel2DownLoader:
             collections=["sentinel-2-l2a"],
             bbox=self.bbox,
             datetime=self.time,
-            query={"eo:cloud_cover": {"lt": 20}}
+            query={"eo:cloud_cover": {"lt": 10}}
         )
         self.items = list(search.items())
         self._download_index = 0
@@ -502,7 +503,7 @@ if __name__ == "__main__":
 
     logger.info("Starting Sentinel2Loader main execution")
     loader = Sentinel2DownLoader(
-        bbox=GeoBBOXs["Poland"],
+        bbox=GeoBBOXs["Poland_with_bounds"],
         time="2024-01-01/2024-12-31",
         max_items=max_items
     )
