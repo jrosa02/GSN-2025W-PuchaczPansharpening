@@ -106,8 +106,7 @@ def normalize_img(x):
     x = x - x.min()
     x = x / (x.max() + 1e-8)
     return x
-
-def plot_pansharpen_examples(
+def plot_pansharpen_bands(
     model,
     test_loader,
     num_samples=5,
@@ -115,25 +114,20 @@ def plot_pansharpen_examples(
     device = next(model.parameters()).device
     model.eval()
 
-    # Get one batch large enough
     batch = next(iter(test_loader))
     (rgb, ms_lr), ms_hr = batch
+
     rgb = rgb.to(device)
     ms_lr = ms_lr.to(device)
     ms_hr = ms_hr.to(device)
-    # (rgb, ms_lr), ms_hr = [x.to(device) for x in batch]
 
     B = rgb.size(0)
     idxs = random.sample(range(B), min(num_samples, B))
 
     with torch.no_grad():
-        # Forward
         pred_norm = model(rgb, ms_lr)
-        pred = (
-            denormalize(pred_norm)
-        )
+        pred = denormalize(pred_norm)
 
-        # Upsample MS input for visualization
         ms_lr_up = F.interpolate(
             ms_lr,
             size=pred.shape[-2:],
@@ -141,43 +135,53 @@ def plot_pansharpen_examples(
             align_corners=False,
         )
 
-    for i, idx in enumerate(idxs):
-        fig = plt.figure(figsize=(15, 25))
+    for idx in idxs:
+        fig = plt.figure(figsize=(18, 22))
         fig.suptitle(f"Sample {idx}", fontsize=16)
 
         # ---- RGB ----
-        ax = plt.subplot2grid((5, 4), (0, 0), colspan=4)
+        ax = plt.subplot2grid((5, 5), (0, 0), colspan=5)
         rgb_img = rgb[idx].permute(1, 2, 0).cpu()
         ax.imshow(normalize_img(rgb_img))
         ax.set_title("RGB input")
         ax.axis("off")
 
-        # ---- MS bands ----
         for b in range(4):
-            # MS LR
-            ax = plt.subplot2grid((5, 4), (b + 1, 0))
+            row = b + 1
+
+            # MS LR (upsampled)
+            ax = plt.subplot2grid((5, 5), (row, 0))
             ax.imshow(normalize_img(ms_lr_up[idx, b].cpu()), cmap="gray")
             ax.set_title(f"MS LR band {b}")
             ax.axis("off")
 
             # Prediction
-            ax = plt.subplot2grid((5, 4), (b + 1, 1))
+            ax = plt.subplot2grid((5, 5), (row, 1))
             ax.imshow(normalize_img(pred[idx, b].cpu()), cmap="gray")
             ax.set_title(f"Pred band {b}")
             ax.axis("off")
 
-            # GT
-            ax = plt.subplot2grid((5, 4), (b + 1, 2))
+            # Ground truth
+            ax = plt.subplot2grid((5, 5), (row, 2))
             ax.imshow(normalize_img(ms_hr[idx, b].cpu()), cmap="gray")
             ax.set_title(f"GT band {b}")
             ax.axis("off")
 
-            # Error
-            ax = plt.subplot2grid((5, 4), (b + 1, 3))
+            # Prediction error
+            ax = plt.subplot2grid((5, 5), (row, 3))
             err = (pred[idx, b] - ms_hr[idx, b]).abs()
             ax.imshow(normalize_img(err.cpu()), cmap="gray")
-            ax.set_title(f"Error band {b}")
+            ax.set_title("Pred error")
             ax.axis("off")
 
-        # plt.tight_layout()
+            # Interpolation error
+            ax = plt.subplot2grid((5, 5), (row, 4))
+            inter_err = (ms_lr_up[idx, b] - ms_hr[idx, b]).abs()
+            ax.imshow(normalize_img(inter_err.cpu()), cmap="gray")
+            ax.set_title("Interp error")
+            ax.axis("off")
+
+        plt.tight_layout()
         plt.show()
+
+
