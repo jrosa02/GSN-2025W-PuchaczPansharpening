@@ -171,14 +171,14 @@ def plot_pansharpen_bands(
             ax = plt.subplot2grid((5, 5), (row, 3))
             err = (pred[idx, b] - ms_hr[idx, b]).abs()
             ax.imshow(normalize_img(err.cpu()), cmap="gray")
-            ax.set_title(f"Pred error, max: {err.max()}")
+            ax.set_title(f"Pred error, max: {err.max():0.0f}")
             ax.axis("off")
 
             # Interpolation error
             ax = plt.subplot2grid((5, 5), (row, 4))
             inter_err = (ms_lr_up[idx, b] - ms_hr[idx, b]).abs()
             ax.imshow(normalize_img(inter_err.cpu()), cmap="gray")
-            ax.set_title("Interp error, max: {err.max()}")
+            ax.set_title(f"Interp error, max: {inter_err.max():0.0f}")
             ax.axis("off")
 
         plt.tight_layout()
