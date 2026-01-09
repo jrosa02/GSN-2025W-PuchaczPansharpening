@@ -70,7 +70,7 @@ class PanSharpenUnetppLightningTraining(Training):
         self.dataloaders = self.dataset.produce_dataloaders(batch_size=self.config.get_training_batchsize()) #train, val, test
 
     def _init_model(self):
-        self.model = PanSharpenUnetppLightning(base_ch=32, lr=1e-4, dropout_prob=self.dropout_prob)
+        self.model = PanSharpenUnetppLightning(base_ch=128, lr=1e-4, dropout_prob=self.dropout_prob)
 
     def fit(self):
         self.trainer.fit(self.model, self.dataloaders[0], self.dataloaders[1])
@@ -94,7 +94,7 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision('high')
     trainingList = TrainingList()
 
-    for drp in [0, 0.5]:
+    for drp in [0.5]:
         training = PanSharpenUnetppLightningTraining(is_profiling, drp)
         trainingList.append(training)
 

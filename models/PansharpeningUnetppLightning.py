@@ -47,19 +47,23 @@ class Encoder(nn.Module):
         self.enc1 = ConvBlock(in_ch, base_ch, dropout_prob)
         self.enc2 = ConvBlock(base_ch, base_ch * 2, dropout_prob)
         self.enc3 = ConvBlock(base_ch * 2, base_ch * 4, dropout_prob)
+        self.enc4 = ConvBlock(base_ch * 4, base_ch * 8, dropout_prob)
 
         self.pool = nn.MaxPool2d(2)
 
     def forward(self, x):
         f1 = self.enc1(x)          # H, W
         f2 = self.enc2(self.pool(f1))  # H/2
-        f3 = self.enc3(self.pool(f2))  # H/4
-        return f1, f2, f3
-
+        f3 = self.enc3(self.pool(f2))  # H/4  # H/2
+        f4 = self.enc4(self.pool(f3))
+        return f1, f2, f3, f4
 
 class Decoder(nn.Module):
     def __init__(self, base_ch=32, out_ch=4, dropout_prob=0.0):
         super().__init__()
+        self.up3 = nn.ConvTranspose2d(base_ch * 8, base_ch * 4, 2, stride=2)
+        self.dec3 = ConvBlock(base_ch * 8, base_ch * 4, dropout_prob)
+
         self.up2 = nn.ConvTranspose2d(base_ch * 4, base_ch * 2, 2, stride=2)
         self.dec2 = ConvBlock(base_ch * 4, base_ch * 2, dropout_prob)
 
@@ -68,15 +72,17 @@ class Decoder(nn.Module):
 
         self.out_conv = nn.Conv2d(base_ch, out_ch, 1)
 
-    def forward(self, f1, f2, f3):
-        x = self.up2(f3)
+    def forward(self, f1, f2, f3, f4):
+        x = self.up3(f4)
+        x = self.dec3(torch.cat([x, f3], dim=1))
+
+        x = self.up2(x)
         x = self.dec2(torch.cat([x, f2], dim=1))
 
         x = self.up1(x)
         x = self.dec1(torch.cat([x, f1], dim=1))
 
         return self.out_conv(x)
-
 
 def normalize(x, max = np.iinfo(np.uint16).max):
     return x/float(max)
@@ -88,11 +94,11 @@ def denormalize(x, max = np.iinfo(np.uint16).max):
 
 class PanSharpenUnetppLightning(pl.LightningModule):
     def __init__(
-            self,
-            base_ch=32,
-            lr=1e-4,
-            dropout_prob=0.0,  # Add dropout probability parameter
-        ):
+        self,
+        base_ch=128,
+        lr=1e-4,
+        dropout_prob=0.0,
+    ):
         super().__init__()
         self.save_hyperparameters()
         self.mse = mse.MeanSquaredError()
@@ -102,43 +108,40 @@ class PanSharpenUnetppLightning(pl.LightningModule):
         self.rgb_encoder = Encoder(3, base_ch, dropout_prob)
         self.ms_encoder  = Encoder(4, base_ch, dropout_prob)
 
-        # Add dropout to fusion layers if desired
         self.fuse1 = nn.Conv2d(base_ch * 2, base_ch, 1)
         self.fuse2 = nn.Conv2d(base_ch * 4, base_ch * 2, 1)
         self.fuse3 = nn.Conv2d(base_ch * 8, base_ch * 4, 1)
-        
-        # Optional: add dropout after fusion
+        self.fuse4 = nn.Conv2d(base_ch * 16, base_ch * 8, 1)
+
         self.fuse_dropout = nn.Dropout2d(p=dropout_prob) if dropout_prob > 0 else nn.Identity()
 
         self.decoder = Decoder(base_ch, out_ch=4, dropout_prob=dropout_prob)
         self.loss_fn = nn.L1Loss()
 
     def forward(self, rgb, ms_lr):
-        # --- Normalize inputs ---
         rgb = normalize(rgb)
         ms_lr = normalize(ms_lr)
 
-        # Upsample MS to RGB resolution
         ms_up = F.interpolate(ms_lr, size=rgb.shape[-2:], mode="bilinear", align_corners=False)
 
-        rgb_f1, rgb_f2, rgb_f3 = self.rgb_encoder(rgb)
-        ms_f1,  ms_f2,  ms_f3  = self.ms_encoder(ms_up)
+        rgb_f1, rgb_f2, rgb_f3, rgb_f4 = self.rgb_encoder(rgb)
+        ms_f1,  ms_f2,  ms_f3,  ms_f4  = self.ms_encoder(ms_up)
 
         f1 = self.fuse_dropout(self.fuse1(torch.cat([rgb_f1, ms_f1], dim=1)))
         f2 = self.fuse_dropout(self.fuse2(torch.cat([rgb_f2, ms_f2], dim=1)))
         f3 = self.fuse_dropout(self.fuse3(torch.cat([rgb_f3, ms_f3], dim=1)))
+        f4 = self.fuse_dropout(self.fuse4(torch.cat([rgb_f4, ms_f4], dim=1)))
 
-        delta_ms = self.decoder(f1, f2, f3)
+        delta_ms = self.decoder(f1, f2, f3, f4)
 
-        # Residual prediction (still normalized space)
         ms_hr_norm = ms_up + delta_ms
-
         return ms_hr_norm
 
     def training_step(self, batch):
         (rgb, ms_lr), ms_hr = batch
         if all_values_equal_fast(ms_lr):
-            return torch.tensor(0.0, device=self.device, requires_grad=False)
+            pred = self(rgb, ms_lr)
+            return pred.sum() * 0.0
         # Normalize GT MS
         ms_hr_norm = normalize(ms_hr)
         pred_norm = self(rgb, ms_lr)
@@ -150,7 +153,8 @@ class PanSharpenUnetppLightning(pl.LightningModule):
         # During validation, dropout is automatically disabled
         (rgb, ms_lr), ms_hr = batch
         if all_values_equal_fast(ms_lr):
-            return torch.tensor(0.0, device=self.device, requires_grad=False)
+            pred = self(rgb, ms_lr)
+            return pred.sum() * 0.0
         
         # Normalize GT MS
         ms_hr_norm = normalize(ms_hr)
