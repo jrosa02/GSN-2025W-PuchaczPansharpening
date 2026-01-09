@@ -78,6 +78,10 @@ class ConfigParser():
     def get_training_batchsize(self) -> int:
         training_config = self.config['traininig']
         return training_config['batch_size']
+    
+    def get_training_max_samples_restriction(self) -> int:
+        training_config = self.config['traininig']
+        return training_config['max_samples_restriction']
 
 #=============
 # CHUNKINMG CONFIG

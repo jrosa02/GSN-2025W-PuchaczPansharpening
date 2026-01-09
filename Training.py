@@ -13,15 +13,16 @@ import sys
 
 class Training(ABC):
     @abstractmethod
-    def __init__(self, dropout = 0) -> None:
+    def __init__(self, is_profiling = False, dropout = 0) -> None:
         self.dropout_prob = dropout
         self.config = ConfigParser()
+        self.is_profiling = is_profiling
 
     def _init_trainer(self):
         self.trainer = pl.Trainer(
             accelerator= "gpu" if torch.cuda.is_available() else "cpu",
             devices=1,
-            max_epochs=1000,
+            max_epochs=1000 if not is_profiling else 2,
             precision=32,
             callbacks=[
                 ModelCheckpoint(
@@ -57,14 +58,15 @@ class Training(ABC):
         pass
 
 class PanSharpenUnetppLightningTraining(Training):
-    def __init__(self, dropout = 0) -> None:
-        super().__init__(dropout)
+    def __init__(self, is_profiling=False, dropout = 0) -> None:
+        super().__init__(is_profiling, dropout)
         self._init_dataset()
         self._init_trainer()
         self._init_model()
 
     def _init_dataset(self):
-        self.dataset = SentinelCroppedDataset("./dataset_sentinel")
+        max_data_restriction=self.config.get_training_max_samples_restriction() if self.is_profiling else None 
+        self.dataset = SentinelCroppedDataset("./dataset_sentinel", max_data_restriction=max_data_restriction)
         self.dataloaders = self.dataset.produce_dataloaders(batch_size=self.config.get_training_batchsize()) #train, val, test
 
     def _init_model(self):
@@ -87,11 +89,13 @@ class TrainingList:
 
 if __name__ == "__main__":
 
+    is_profiling = '--profile' in sys.argv
+
     torch.set_float32_matmul_precision('high')
     trainingList = TrainingList()
 
     for drp in [0, 0.5]:
-        training = PanSharpenUnetppLightningTraining(drp)
+        training = PanSharpenUnetppLightningTraining(is_profiling, drp)
         trainingList.append(training)
 
     trainingList.listed_fit()

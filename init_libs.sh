@@ -52,7 +52,7 @@ fi
 # Install other packages
 # -------------------------------
 $INSTALLER install pytorch_lightning --upgrade
-$INSTALLER install torchsummary tensorboardX tensorboard --upgrade
+$INSTALLER install torchsummary tensorboardX tensorboard torchmetrics --upgrade
 $INSTALLER install kaggle --upgrade
 $INSTALLER install matplotlib --upgrade
 $INSTALLER install pystac-client planetary-computer --upgrade

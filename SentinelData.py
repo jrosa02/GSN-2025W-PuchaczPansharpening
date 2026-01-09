@@ -269,7 +269,7 @@ class Sentinel2DownLoader:
 # ================================================================================================================================
 
 class SentinelDataset(Dataset):
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, max_data_restriction = None) -> None:
         super().__init__()
         path = Path(path).resolve()
 
@@ -294,8 +294,10 @@ class SentinelDataset(Dataset):
 
         self.num_samples = len(self.files_rgb)
 
+        self.max_data_restriction = max_data_restriction
+
     def __len__(self) -> int:
-        return self.num_samples
+        return self.num_samples if self.max_data_restriction is None else self.max_data_restriction
 
     def __getitem__(self, index):
         rgb = torch.load(str(self.files_rgb[index]), weights_only=False)
@@ -345,8 +347,9 @@ class SentinelCroppedDataset(SentinelDataset):
         mul_crop: Tuple[int, int] | None = None,
         out_crop: Tuple[int, int] | None = None,
         cache_size: int = 4,  # Number of images to cache per worker
+        max_data_restriction = None,
     ):
-        super().__init__(path)
+        super().__init__(path, max_data_restriction)
 
         if rgb_crop is None:
             rgb_crop = tuple(self.config.get_chunk_size())
@@ -377,7 +380,7 @@ class SentinelCroppedDataset(SentinelDataset):
         self.cache_size = cache_size
 
     def __len__(self) -> int:
-        return self.num_samples
+        return self.num_samples if self.max_data_restriction is None else self.max_data_restriction
 
     def __getitem__(self, index):
         # Calculate which image and tile this index refers to

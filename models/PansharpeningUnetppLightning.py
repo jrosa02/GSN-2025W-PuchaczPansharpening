@@ -2,10 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from torchview import draw_graph
 import numpy as np
+from torchmetrics.image import PeakSignalNoiseRatio
+from torchmetrics.regression import mae, mse
+
+def all_values_equal_fast(x: torch.Tensor) -> bool:
+    if x.numel() == 0:
+        return True
+    return bool((x.min() == x.max()).item())
 
 class ConvBlock(nn.Module):
     def __init__(self, in_ch, out_ch, dropout_prob=0.0):
@@ -90,6 +95,9 @@ class PanSharpenUnetppLightning(pl.LightningModule):
         ):
         super().__init__()
         self.save_hyperparameters()
+        self.mse = mse.MeanSquaredError()
+        self.mae = mae.MeanAbsoluteError()
+        self.psnr = PeakSignalNoiseRatio(data_range=10)
 
         self.rgb_encoder = Encoder(3, base_ch, dropout_prob)
         self.ms_encoder  = Encoder(4, base_ch, dropout_prob)
@@ -129,6 +137,8 @@ class PanSharpenUnetppLightning(pl.LightningModule):
 
     def training_step(self, batch):
         (rgb, ms_lr), ms_hr = batch
+        if all_values_equal_fast(ms_lr):
+            return torch.tensor(0.0, device=self.device, requires_grad=False)
         # Normalize GT MS
         ms_hr_norm = normalize(ms_hr)
         pred_norm = self(rgb, ms_lr)
@@ -136,13 +146,43 @@ class PanSharpenUnetppLightning(pl.LightningModule):
         self.log("train_l1", loss, prog_bar=True)
         return loss
 
-    def validation_step(self, batch):
+    def validation_step(self, batch, batch_idx):
         # During validation, dropout is automatically disabled
         (rgb, ms_lr), ms_hr = batch
+        if all_values_equal_fast(ms_lr):
+            return torch.tensor(0.0, device=self.device, requires_grad=False)
+        
+        # Normalize GT MS
         ms_hr_norm = normalize(ms_hr)
         pred_norm = self(rgb, ms_lr)
+        
+        # Compute L1 loss (in normalized space)
         loss = self.loss_fn(pred_norm, ms_hr_norm)
+               
+        # Update metrics with current batch
+        self.mae.update(pred_norm, ms_hr_norm)
+        self.mse.update(pred_norm, ms_hr_norm)
+        self.psnr.update(pred_norm, ms_hr_norm)
+        
+        # Log the loss
         self.log("val_l1", loss, prog_bar=True)
+        
+        return loss
+
+    def on_validation_epoch_end(self):
+        # Compute and log aggregated metrics at the end of validation epoch
+        val_mae = self.mae.compute()
+        val_mse = self.mse.compute()
+        val_psnr = self.psnr.compute()
+        
+        self.log("val_mae", val_mae, prog_bar=True)
+        self.log("val_mse", val_mse)
+        self.log("val_psnr", val_psnr, prog_bar=True)
+        
+        # Reset metrics for next epoch
+        self.mae.reset()
+        self.mse.reset()
+        self.psnr.reset()
 
     def predict_step(self, batch):
         # During prediction, dropout is automatically disabled
