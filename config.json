@@ -40,10 +40,10 @@
     "system_storage_size_cap_GB": 100,
 
     "traininig":{
-        "num_workers": 32,
-        "batch_size": 4,
+        "num_workers": 64,
+        "batch_size": 6,
         "max_epochs": 1000,
-        "dropouts": [0, 0.2, 0.5],
-        "max_samples_restriction": 100
+        "dropouts": [0.5],
+        "max_samples_restriction": 500
     }
 }

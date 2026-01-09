@@ -70,7 +70,7 @@ class PanSharpenUnetppLightningTraining(Training):
         self.dataloaders = self.dataset.produce_dataloaders(batch_size=self.config.get_training_batchsize()) #train, val, test
 
     def _init_model(self):
-        self.model = PanSharpenUnetppLightning(base_ch=128, lr=1e-4, dropout_prob=self.dropout_prob)
+        self.model = PanSharpenUnetppLightning(base_ch=64, lr=1e-4, dropout_prob=self.dropout_prob)
 
     def fit(self):
         self.trainer.fit(self.model, self.dataloaders[0], self.dataloaders[1])
