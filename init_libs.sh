@@ -64,5 +64,5 @@ $INSTALLER install pytest --upgrade
 $INSTALLER install ipykernel --upgrade
 $INSTALLER install torchview --upgrade
 $INSTALLER install torchcam --upgrade
-
+$INSTALLER install ipympl
 echo "All packages installed successfully!"
