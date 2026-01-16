@@ -95,9 +95,15 @@ class PanSharpenUnetppLightning(pl.LightningModule):
         ):
         super().__init__()
         self.save_hyperparameters()
+        # Prediction metrics
         self.mse = mse.MeanSquaredError()
         self.mae = mae.MeanAbsoluteError()
-        self.psnr = PeakSignalNoiseRatio(data_range=10)
+        self.psnr = PeakSignalNoiseRatio(data_range=1.0)
+
+        # Input (baseline) metrics
+        self.mse_input = mse.MeanSquaredError()
+        self.mae_input = mae.MeanAbsoluteError()
+        self.psnr_input = PeakSignalNoiseRatio(data_range=1.0)
 
         self.rgb_encoder = Encoder(3, base_ch, dropout_prob)
         self.ms_encoder  = Encoder(4, base_ch, dropout_prob)
@@ -191,6 +197,77 @@ class PanSharpenUnetppLightning(pl.LightningModule):
         # Denormalize output for inference
         pred = denormalize(pred_norm)
         return pred
+    
+    def test_step(self, batch, batch_idx):
+        (rgb, ms_lr), ms_hr = batch
+
+        if all_values_equal_fast(ms_lr):
+            return torch.tensor(0.0, device=self.device, requires_grad=False)
+
+        # Normalize GT
+        ms_hr_norm = normalize(ms_hr)
+
+        # ---- Prediction ----
+        pred_norm = self(rgb, ms_lr)
+        loss = self.loss_fn(pred_norm, ms_hr_norm)
+
+        # ---- Baseline (input) ----
+        ms_up = F.interpolate(
+            normalize(ms_lr),
+            size=ms_hr_norm.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        # Update prediction metrics
+        self.mae.update(pred_norm, ms_hr_norm)
+        self.mse.update(pred_norm, ms_hr_norm)
+        self.psnr.update(pred_norm, ms_hr_norm)
+
+        # Update input/baseline metrics
+        self.mae_input.update(ms_up, ms_hr_norm)
+        self.mse_input.update(ms_up, ms_hr_norm)
+        self.psnr_input.update(ms_up, ms_hr_norm)
+
+        # Log loss
+        self.log("test_l1", loss, prog_bar=True, on_epoch=True)
+
+        return loss
+
+    def on_test_epoch_end(self):
+        # Prediction metrics
+        test_mae = self.mae.compute()
+        test_mse = self.mse.compute()
+        test_psnr = self.psnr.compute()
+
+        # Input (baseline) metrics
+        test_mae_input = self.mae_input.compute()
+        test_mse_input = self.mse_input.compute()
+        test_psnr_input = self.psnr_input.compute()
+
+        # Log prediction metrics
+        self.log("test_mae", test_mae, prog_bar=True)
+        self.log("test_mse", test_mse)
+        self.log("test_psnr", test_psnr, prog_bar=True)
+
+        # Log baseline metrics
+        self.log("test_input_mae", test_mae_input, prog_bar=True)
+        self.log("test_input_mse", test_mse_input)
+        self.log("test_input_psnr", test_psnr_input, prog_bar=True)
+
+        # Optional: improvement deltas (very useful)
+        self.log("test_psnr_gain", test_psnr - test_psnr_input, prog_bar=True)
+        self.log("test_mae_gain", test_mae_input - test_mae)
+        self.log("test_mse_gain", test_mse_input - test_mse)
+
+        # Reset all metrics
+        self.mae.reset()
+        self.mse.reset()
+        self.psnr.reset()
+        self.mae_input.reset()
+        self.mse_input.reset()
+        self.psnr_input.reset()
+
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
